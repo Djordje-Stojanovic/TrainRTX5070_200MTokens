@@ -845,7 +845,7 @@ FINAL_LR_FRAC = 0.1
 
 # Model size + memory defaults
 DEPTH = 16
-MLP_ONLY_LAYERS = set()  # All layers have attention (throughput irrelevant with fixed token budget)
+MLP_ONLY_LAYERS = {12, 13, 14}  # S-layers replaced with MLP-only for throughput
 DEVICE_BATCH_SIZE = 16
 EVAL_BATCH_SIZE = 8
 
