@@ -346,8 +346,6 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
         self.ve_gate_channels = 12
         self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False)
-        # Attention output gate: per-head sigmoid gate on SDPA output (NeurIPS 2025)
-        self.attn_out_gate = nn.Linear(self.ve_gate_channels, self.n_head, bias=False)
         # QK-norm makes attention logits width-invariant already, so muP 1/d scaling
         # is unnecessary and harmful (makes softmax too flat). Keep 1/sqrt(d).
         self.attn_scale = 1.0 / self.head_dim ** 0.5
@@ -401,11 +399,7 @@ class CausalSelfAttention(nn.Module):
             y = flex_attention(q, k, v, block_mask=block_mask,
                               enable_gqa=self.n_kv_head < self.n_head,
                               scale=self.attn_scale)
-        y = y.transpose(1, 2)  # (B, T, H, D)
-
-        # Attention output gate: per-head modulation to reduce attention sinks
-        attn_gate = 2 * torch.sigmoid(self.attn_out_gate(x[..., :self.ve_gate_channels]))  # (B, T, H) in [0, 2]
-        y = y * attn_gate.unsqueeze(-1)
+        y = y.transpose(1, 2)
 
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
@@ -492,7 +486,6 @@ class GPT(nn.Module):
                 torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
                 torch.nn.init.zeros_(block.attn.c_proj.weight)
                 torch.nn.init.zeros_(block.attn.ve_gate.weight)  # sigmoid(0)=0.5, gate=1.5
-                torch.nn.init.zeros_(block.attn.attn_out_gate.weight)  # 2*sigmoid(0)=1.0, identity init
             torch.nn.init.uniform_(block.mlp.c_gate.weight, -s, s)
             torch.nn.init.uniform_(block.mlp.c_up.weight, -s, s)
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
