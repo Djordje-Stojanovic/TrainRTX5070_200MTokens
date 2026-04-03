@@ -471,11 +471,11 @@ class GPT(nn.Module):
 
     @torch.no_grad()
     def init_weights(self, embed_dtype=torch.bfloat16):
+        n_embd = self.config.n_embd
         torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=1.0)
         torch.nn.init.normal_(self.value_emb.weight, mean=0.0, std=0.02)
         lm_head_std = 1.0 / n_embd  # muP: output layer init scales as 1/width
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=lm_head_std)
-        n_embd = self.config.n_embd
         s = 3 ** 0.5 * n_embd ** -0.5
         for block in self.transformer.h:
             if not block.mlp_only:
