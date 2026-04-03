@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+uv.lock
+run.log
+run_variance*.log
+checkpoint_pre_eval.pt
+*.pyd
