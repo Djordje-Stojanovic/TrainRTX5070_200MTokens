@@ -343,11 +343,7 @@ class CausalSelfAttention(nn.Module):
         self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
         self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
-        # Differential attention: pair heads and subtract to cancel attention noise
-        self.n_diff_head = self.n_head // 2
-        self.diff_lambda = nn.Parameter(torch.zeros(self.n_diff_head))
-        diff_out_dim = self.n_diff_head * self.head_dim
-        self.c_proj = nn.Linear(diff_out_dim, self.n_embd, bias=False)
+        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
         self.ve_gate_channels = 12
         self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False)
         # QK-norm makes attention logits width-invariant already, so muP 1/d scaling
@@ -403,14 +399,8 @@ class CausalSelfAttention(nn.Module):
             y = flex_attention(q, k, v, block_mask=block_mask,
                               enable_gqa=self.n_kv_head < self.n_head,
                               scale=self.attn_scale)
-        # Differential attention: pair consecutive heads and subtract
-        y1 = y[:, 0::2]  # (B, n_diff_head, T, head_dim)
-        y2 = y[:, 1::2]  # (B, n_diff_head, T, head_dim)
-        lam = torch.sigmoid(self.diff_lambda).view(1, -1, 1, 1)
-        y = y1 - lam * y2
-        y = F.rms_norm(y, (y.size(-1),))  # head-wise normalization
-
         y = y.transpose(1, 2)
+
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
@@ -495,7 +485,6 @@ class GPT(nn.Module):
                 torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
                 torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
                 torch.nn.init.zeros_(block.attn.c_proj.weight)
-                torch.nn.init.constant_(block.attn.diff_lambda, 1.386)  # sigmoid(1.386)≈0.8
                 torch.nn.init.zeros_(block.attn.ve_gate.weight)  # sigmoid(0)=0.5, gate=1.5
             torch.nn.init.uniform_(block.mlp.c_gate.weight, -s, s)
             torch.nn.init.uniform_(block.mlp.c_up.weight, -s, s)
@@ -578,14 +567,8 @@ class GPT(nn.Module):
         model_dim = self.config.n_embd
         # Separate MLP c_proj params for optional LR multiplier
         mlp_cproj_ids = {id(block.mlp.c_proj.weight) for block in self.transformer.h}
-        # Separate diff_lambda (1D scalar params) from matrix params
-        diff_lambda_ids = set()
-        for block in self.transformer.h:
-            if not block.mlp_only and hasattr(block.attn, 'diff_lambda'):
-                diff_lambda_ids.add(id(block.attn.diff_lambda))
         all_h_params = list(self.transformer.h.parameters())
-        diff_lambda_params = [p for p in all_h_params if id(p) in diff_lambda_ids]
-        matrix_params = [p for p in all_h_params if id(p) not in mlp_cproj_ids and id(p) not in diff_lambda_ids]
+        matrix_params = [p for p in all_h_params if id(p) not in mlp_cproj_ids]
         mlp_cproj_params = [p for p in all_h_params if id(p) in mlp_cproj_ids]
         embedding_params = list(self.transformer.wte.parameters())
         value_emb_params = list(self.value_emb.parameters())
@@ -600,7 +583,6 @@ class GPT(nn.Module):
             + len(lm_head_params)
             + len(resid_params)
             + len(x0_params)
-            + len(diff_lambda_params)
         )
         # muP scaling factors (at base width MUP_BASE_WIDTH, all factors = 1.0)
         mup_embed_lr_scale = 1.0  # Input embeddings: no width scaling
@@ -615,7 +597,6 @@ class GPT(nn.Module):
             dict(kind="adamw", params=value_emb_params, lr=embedding_lr * mup_embed_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=resid_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
-            dict(kind="adamw", params=diff_lambda_params, lr=scalar_lr * 0.1, betas=adam_betas, eps=1e-10, weight_decay=0.0),
         ]
         muon_group_chunk = 8
         for shape in sorted({p.shape for p in matrix_params}):
