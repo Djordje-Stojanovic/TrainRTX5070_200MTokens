@@ -21,7 +21,7 @@ Read @CLAUDE.md and @program.md fully. These are your operating instructions —
 Read @results.tsv to see what's been tried. Read @ideas.tsv for queued ideas.
 Read @train.py and @prepare.py to understand the current architecture.
 
-You are on the autoresearch/<tag> branch. git pull first.
+You are on the autoresearch/apr03 branch. git pull origin autoresearch/apr03 first.
 Do a landscape scan (web search) before your first experiment.
 Ultrathink. Don't repeat what's already been tried. Be creative — try genuinely novel ideas.
 Run the experiment loop forever. Follow CLAUDE.md and program.md precisely.

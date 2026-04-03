@@ -5,7 +5,7 @@
 1. **NEVER `git reset --hard`** — to discard, revert only train.py: `git checkout <commit> -- train.py`
 2. **NEVER poll training** — first check after `sleep 240` (4 min), then `sleep 600` (10 min) between checks, max 7 checks per run
 3. **ALWAYS follow the post-experiment checklist** (below) — no exceptions, no skipping steps
-4. **ALWAYS push after every experiment** — `git push origin autoresearch/<tag>`
+4. **ALWAYS push after every experiment** — `git push origin autoresearch/apr03`
 5. **NEVER stop the loop** — run experiments forever until manually interrupted
 6. **NEVER change fairness invariants** — TOKEN_BUDGET, MAX_SEQ_LEN, evaluate_bpb(), dataset/tokenizer
 7. **ALWAYS deduplicate before experimenting** — Before writing ANY code for a new experiment, grep `results.tsv` for keywords related to your planned change. If it was already tried, DO NOT repeat it. Read the prior result's description to understand why it failed. Pick something genuinely new instead. Wasting ~50 minutes re-running a failed experiment is a critical bug.
@@ -32,7 +32,7 @@ git commit -m "revert: undo <description>"
 git add ideas.tsv && git commit -m "ideas: remove <id> (tried)"
 
 # 6. Push everything
-git push origin autoresearch/<tag>
+git push origin autoresearch/apr03
 ```
 
 **Description column MUST be diagnostic.** Include: (1) what changed with values, (2) the hypothesis and evidence that motivated it, (3) what happened, (4) the conclusion — WHY it worked/failed and what this rules out. This is the AI's long-term memory. Future sessions read ONLY results.tsv, not git log.

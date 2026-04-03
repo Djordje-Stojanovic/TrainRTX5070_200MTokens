@@ -8,8 +8,8 @@ This is an experiment to have the LLM do its own research.
 
 To set up a new experiment, work with the user to:
 
-1. **Agree on a run tag**: propose a tag based on today's date (e.g. `apr03`). The branch `autoresearch/<tag>` must not already exist — this is a fresh run.
-2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current main.
+1. **Agree on a run tag**: propose a tag based on today's date (e.g. `apr03`). The branch `autoresearch/apr03` must not already exist — this is a fresh run.
+2. **Create the branch**: `git checkout -b autoresearch/apr03` from current main.
 3. **Read the in-scope files**: The repo is small. Read these files for full context:
    - `CLAUDE.md` — project context, what you can/can't change, fairness rules.
    - `train.py` — model architecture (SwiGLU d16, ~200M params), optimizer (Muon+AdamW), training loop.
@@ -129,7 +129,7 @@ LOOP FOREVER:
 
    **MANDATORY DEDUPLICATION CHECK (before EVERY experiment):**
    Before writing any code, grep `results.tsv` for keywords related to your planned change. If a similar experiment was already tried, DO NOT repeat it. Read the description of the prior attempt to understand WHY it failed, then either (a) pick a genuinely different experiment, or (b) document exactly what's different this time.
-1. `git pull origin autoresearch/<tag>` — pick up any doc updates pushed between experiments.
+1. `git pull origin autoresearch/apr03` — pick up any doc updates pushed between experiments.
 2. Make your experimental change (primarily `train.py`, but other files if needed per the rules in `CLAUDE.md`).
 3. git commit (with the hypothesis from step 0 in the message)
 4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
