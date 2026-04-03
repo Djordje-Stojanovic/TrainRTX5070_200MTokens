@@ -5,4 +5,4 @@ uv.lock
 run.log
 run_variance*.log
 checkpoint_pre_eval.pt
-*.pyd
+# Keep _C_mxfp8.pyd (needed for MXFP8 cuBLAS training)

@@ -17,7 +17,14 @@ This project redesigns the autoresearch loop so that 1-hour findings **scale to 
 ## Start the AI agent
 
 ```
-Read @program.md and @CLAUDE.md. Continue the experiment loop on the autoresearch/<tag> branch. The baseline is already recorded in results.tsv. Start experimenting. Remember to git pull first and do a landscape scan web search before your first experiment.
+Read @CLAUDE.md and @program.md fully. These are your operating instructions — follow them in detail.
+Read @results.tsv to see what's been tried. Read @ideas.tsv for queued ideas.
+Read @train.py and @prepare.py to understand the current architecture.
+
+You are on the autoresearch/<tag> branch. git pull first.
+Do a landscape scan (web search) before your first experiment.
+Ultrathink. Don't repeat what's already been tried. Be creative — try genuinely novel ideas.
+Run the experiment loop forever. Follow CLAUDE.md and program.md precisely.
 ```
 
 Paste this into Claude Code (with bypass permissions on). Monitor in two PowerShell windows:

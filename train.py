@@ -346,7 +346,9 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
         self.ve_gate_channels = 12
         self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False)
-        self.attn_scale = 1.0 / self.head_dim  # muP: 1/d instead of 1/sqrt(d)
+        # QK-norm makes attention logits width-invariant already, so muP 1/d scaling
+        # is unnecessary and harmful (makes softmax too flat). Keep 1/sqrt(d).
+        self.attn_scale = 1.0 / self.head_dim ** 0.5
         self._mask_cache = {}
 
     def _get_flex_block_mask(self, seq_len, window, device):

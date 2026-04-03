@@ -67,7 +67,7 @@ Read **`program.md`** for the full experiment loop protocol, logging format, and
 | Tokenizer | GPT-2 (vocab=50257), EOT token as BOS |
 | Optimizer | Muon (matrices) + AdamW (embeddings, scalars) |
 | Compile | torch.compile via triton-windows |
-| Attention | SDPA with is_causal=True (FlashAttention fast path), muP scale (1/d_head) |
+| Attention | SDPA with is_causal=True (FlashAttention fast path), QK-norm, 1/sqrt(d_head) scale |
 | MFU | ~80-90% **relative to BF16 peak** (see MFU caveat below) |
 | Token budget | 200M tokens per experiment (~1526 steps at batch 2^17) |
 | LR schedule | WSD: 5% warmup, 95% stable (no decay) |

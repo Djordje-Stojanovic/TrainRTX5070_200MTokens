@@ -1,2 +1,1 @@
 commit	val_bpb	memory_gb	mfu	tok_per_sec	num_steps	num_params_M	batch_size	final_loss	status	description
-9017416	1.216153	8.1	71.3	49500	1526	222.0	4	3.064	keep	baseline (SwiGLU d16 WSD+muP 200M tokens, partial RoPE, token shifting, MLP-only layers, value embeddings)
