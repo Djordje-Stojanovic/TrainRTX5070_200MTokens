@@ -1,1 +1,2 @@
 commit	val_bpb	memory_gb	mfu	tok_per_sec	num_steps	num_params_M	batch_size	final_loss	status	description
+2f1d3e8	0.919005	8.1	71.0	49757	1526	222.0	4	2.709	keep	baseline (SwiGLU d16, partial RoPE, value embeddings, token shifting, QK-norm, SSSL window pattern, Muon+AdamW, WSD 5% warmup + 95% stable, muP base=768, MXFP8, 222M params, 200M tokens on ClimbMix)
