@@ -594,7 +594,7 @@ class GPT(nn.Module):
         param_groups = [
             dict(kind="adamw", params=lm_head_params, lr=unembedding_lr * mup_output_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=embedding_params, lr=embedding_lr * mup_embed_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind="adamw", params=value_emb_params, lr=embedding_lr * mup_embed_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+            dict(kind="adamw", params=value_emb_params, lr=embedding_lr * mup_embed_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.1),
             dict(kind="adamw", params=resid_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
         ]
