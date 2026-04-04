@@ -829,7 +829,7 @@ MUP_BASE_WIDTH = 768
 ASPECT_RATIO = 48         # model_dim = depth * ASPECT_RATIO
 HEAD_DIM = 128            # target head dimension for attention
 WINDOW_PATTERN = "SSSL"   # sliding window on early layers, full on every 4th
-SHORT_WINDOW = 256        # short window size in tokens (modded-nanogpt uses 128-384)
+SHORT_WINDOW = 512        # short window size in tokens (wider context per nanochat finding)
 
 # Optimization
 TOTAL_BATCH_SIZE = 2 ** 17
