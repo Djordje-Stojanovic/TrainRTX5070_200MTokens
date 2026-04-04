@@ -645,10 +645,21 @@ class GPT(nn.Module):
         x = norm(x)
         x0 = x
         ve = self.value_emb(idx)
+        n_layer = len(self.transformer.h)
+        half = n_layer // 2
+        skips = [None] * half
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             window_size = self.window_sizes[i]
+            # U-net skip: add saved early-layer output before corresponding late layer
+            if i >= half:
+                mirror = n_layer - 1 - i
+                if mirror < half and skips[mirror] is not None:
+                    x = x + skips[mirror]
             x = block(x, cos_sin, window_size, ve=ve)
+            # Save first-half outputs for U-net skip connections
+            if i < half:
+                skips[i] = x
         x = norm(x)
 
         softcap = 15
