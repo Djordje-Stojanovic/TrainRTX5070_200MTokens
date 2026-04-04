@@ -839,7 +839,7 @@ MATRIX_LR = 0.04
 SCALAR_LR = 0.5
 WEIGHT_DECAY = 0.0
 ADAM_BETAS = (0.8, 0.95)
-WARMUP_RATIO = 0.02
+WARMUP_RATIO = 0.05
 WARMDOWN_RATIO = 0.0         # WSD: no decay for experiment runs (warmup + stable only)
 FINAL_LR_FRAC = 0.1
 
