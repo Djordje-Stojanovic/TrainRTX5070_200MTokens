@@ -365,7 +365,7 @@ class CausalSelfAttention(nn.Module):
         self._mask_cache[cache_key] = mask
         return mask
 
-    def forward(self, x, cos_sin, window_size, ve=None, attn_temp=None):
+    def forward(self, x, cos_sin, window_size, ve=None):
         B, T, _ = x.size()
         q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
         k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
@@ -385,12 +385,6 @@ class CausalSelfAttention(nn.Module):
         k = torch.cat([k_rot, k_pass_shifted], dim=-1)
         q, k = norm(q), norm(k)
 
-        # Learnable attention temperature: exp(attn_temp) * base_scale
-        # Apply by scaling q directly (preserves SDPA float scale compatibility)
-        if attn_temp is not None:
-            q = q * torch.exp(attn_temp)
-        scale = self.attn_scale
-
         q = q.transpose(1, 2)  # (B, H, T, D)
         k = k.transpose(1, 2)  # (B, KVH, T, D)
         v = v.transpose(1, 2).to(q.dtype)  # (B, KVH, T, D), match q dtype for flex_attention
@@ -398,13 +392,13 @@ class CausalSelfAttention(nn.Module):
             y = F.scaled_dot_product_attention(
                 q, k, v, is_causal=True,
                 enable_gqa=self.n_kv_head < self.n_head,
-                scale=scale,
+                scale=self.attn_scale,
             )
         else:
             block_mask = self._get_flex_block_mask(T, window_size[0], q.device)
             y = flex_attention(q, k, v, block_mask=block_mask,
                               enable_gqa=self.n_kv_head < self.n_head,
-                              scale=scale)
+                              scale=self.attn_scale)
         y = y.transpose(1, 2)
 
         y = y.contiguous().view(B, T, -1)
@@ -433,14 +427,14 @@ class Block(nn.Module):
         self.mlp = MLP(config)
         self.use_mlp_checkpointing = config.use_activation_checkpointing
 
-    def forward(self, x, cos_sin, window_size, ve=None, attn_temp=None):
+    def forward(self, x, cos_sin, window_size, ve=None):
         if not self.mlp_only:
             # Token shift: mix last quarter of channels with previous position
             quarter = x.size(-1) // 4
             x_prev = torch.roll(x, 1, dims=1)
             x_prev[:, 0, :] = x[:, 0, :]
             x_attn_in = torch.cat([x[:, :, :3*quarter], x_prev[:, :, 3*quarter:]], dim=-1)
-            x = x + norm(self.attn(norm(x_attn_in), cos_sin, window_size, ve=ve, attn_temp=attn_temp))
+            x = x + norm(self.attn(norm(x_attn_in), cos_sin, window_size, ve=ve))
         if self.mlp_only:
             # Token shift for MLP-only layers: only local context source since no attention
             quarter = x.size(-1) // 4
@@ -471,7 +465,6 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
-        self.attn_temps = nn.Parameter(torch.zeros(config.n_layer))  # log-scale attention temperature
         head_dim = config.n_embd // config.n_head
         self.rotary_seq_len = config.sequence_len
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim, dtype=config.compute_dtype)
@@ -498,7 +491,6 @@ class GPT(nn.Module):
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
         self.resid_lambdas.fill_(1.0)
         self.x0_lambdas.fill_(0.2)
-        self.attn_temps.fill_(0.0)  # exp(0) = 1.0, no change initially
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(
             self.rotary_seq_len,
@@ -542,7 +534,6 @@ class GPT(nn.Module):
             + self.value_emb.weight.numel()
             + self.resid_lambdas.numel()
             + self.x0_lambdas.numel()
-            + self.attn_temps.numel()
         )
         h = self.config.n_head
         q = self.config.n_embd // self.config.n_head
@@ -559,7 +550,7 @@ class GPT(nn.Module):
         value_emb = sum(p.numel() for p in self.value_emb.parameters())
         lm_head = sum(p.numel() for p in self.lm_head.parameters())
         transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
-        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.attn_temps.numel()
+        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel()
         total = wte + value_emb + lm_head + transformer_matrices + scalars
         return {
             "wte": wte,
@@ -584,7 +575,6 @@ class GPT(nn.Module):
         lm_head_params = list(self.lm_head.parameters())
         resid_params = [self.resid_lambdas]
         x0_params = [self.x0_lambdas]
-        attn_temp_params = [self.attn_temps]
         assert len(list(self.parameters())) == (
             len(matrix_params)
             + len(mlp_cproj_params)
@@ -593,7 +583,6 @@ class GPT(nn.Module):
             + len(lm_head_params)
             + len(resid_params)
             + len(x0_params)
-            + len(attn_temp_params)
         )
         # muP scaling factors (at base width MUP_BASE_WIDTH, all factors = 1.0)
         mup_embed_lr_scale = 1.0  # Input embeddings: no width scaling
@@ -608,7 +597,6 @@ class GPT(nn.Module):
             dict(kind="adamw", params=value_emb_params, lr=embedding_lr * mup_embed_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=resid_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
-            dict(kind="adamw", params=attn_temp_params, lr=scalar_lr * 0.1, betas=(0.9, 0.95), eps=1e-10, weight_decay=0.0),
         ]
         muon_group_chunk = 8
         for shape in sorted({p.shape for p in matrix_params}):
@@ -660,7 +648,7 @@ class GPT(nn.Module):
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             window_size = self.window_sizes[i]
-            x = block(x, cos_sin, window_size, ve=ve, attn_temp=self.attn_temps[i])
+            x = block(x, cos_sin, window_size, ve=ve)
         x = norm(x)
 
         softcap = 15
