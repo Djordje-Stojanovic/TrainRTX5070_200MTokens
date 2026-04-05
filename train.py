@@ -490,7 +490,7 @@ class GPT(nn.Module):
             torch.nn.init.uniform_(block.mlp.c_up.weight, -s, s)
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
         self.resid_lambdas.fill_(1.0)
-        self.x0_lambdas.fill_(0.2)
+        self.x0_lambdas.fill_(0.4)
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(
             self.rotary_seq_len,
