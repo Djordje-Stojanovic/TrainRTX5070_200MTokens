@@ -135,7 +135,7 @@ LOOP FOREVER:
 
    **b. Triage `ideas.tsv`:** For each `pending` idea, confirm it hasn't been ruled out by `results.tsv`. If an idea IS ruled out, delete that row AND cite the specific results.tsv commit hash that proves it in the deletion commit message. You may NOT skip an idea because it "looks low-impact" — only because results.tsv specifically rules it out. See CLAUDE.md rule 9.
 
-   **c. If during analysis you think of a NEW idea:** STOP. Before writing any code, WRITE the idea into `ideas.tsv` as a new row with ALL 7 columns filled:
+   **c. If during analysis you think of a NEW idea:** STOP. Before writing any code, APPEND the idea to the BOTTOM of `ideas.tsv` (never insert at top) as a new row with ALL 7 columns filled:
    - `id`: short-kebab-case-##
    - `status`: `pending`
    - `idea`: 1-line description with concrete values (e.g. "x0_lambdas init 0.2->0.4")
@@ -144,7 +144,7 @@ LOOP FOREVER:
    - `evidence`: cite prior exp / web search / metric
    - `notes`: risks, expected params change, hypothesis
 
-   **d. Sort `ideas.tsv` by expected impact x probability of success.** The top `pending` row IS your next experiment. No cherry-picking.
+   **d. STRICT FIFO — NO SORTING.** `ideas.tsv` is append-only. New ideas go to the BOTTOM. The next experiment is ALWAYS the OLDEST `pending` row (topmost). Do NOT reorder by impact. Do NOT skip older ideas for newer ones. You may only skip an older idea by ruling it out per CLAUDE.md rule 9 (citing specific results.tsv evidence) and deleting it. No cherry-picking.
 
    **e. Set that row's `status` to `trying`** and commit `ideas.tsv` BEFORE running the experiment. This is your promise to the audit trail.
 
