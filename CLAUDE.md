@@ -9,6 +9,8 @@
 5. **NEVER stop the loop** — run experiments forever until manually interrupted
 6. **NEVER change fairness invariants** — TOKEN_BUDGET, MAX_SEQ_LEN, evaluate_bpb(), dataset/tokenizer
 7. **ALWAYS deduplicate before experimenting** — Before writing ANY code for a new experiment, grep `results.tsv` for keywords related to your planned change. If it was already tried, DO NOT repeat it. Read the prior result's description to understand why it failed. Pick something genuinely new instead. Wasting ~50 minutes re-running a failed experiment is a critical bug.
+8. **ALWAYS route EVERY experiment through `ideas.tsv`** — ZERO exceptions. You do NOT get to invent an experiment on the fly and run it. The flow is: (a) read ideas.tsv, (b) if you think of a new idea during analysis, WRITE IT INTO ideas.tsv FIRST with all 7 columns filled (id, status=pending, idea, category, impact, evidence, notes), (c) set the chosen row's status to `trying` BEFORE running, (d) delete that row after logging result to results.tsv. Bypassing the queue (even for "obviously good" fresh ideas) is a critical protocol violation. See program.md step 0 for the exact sequence.
+9. **ALWAYS prove before skipping a queued idea** — You cannot dismiss a `pending` idea from ideas.tsv unless you can cite SPECIFIC evidence in results.tsv that rules it out (e.g., "ve-wd-09: skipped because 94d986b already tried VE WD and found it catastrophic"). "This looks low-impact to me" is NOT sufficient justification. If you truly think an idea is obsolete, DOCUMENT why in the commit message that deletes it AND cite the specific results.tsv row that proves it.
 
 ## Post-Experiment Checklist (execute EVERY time, in order)
 

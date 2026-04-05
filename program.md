@@ -125,7 +125,36 @@ The experiment runs on a dedicated branch (e.g. `autoresearch/apr03`).
 
 LOOP FOREVER:
 
-0. **Plan:** Read `results.tsv` (what's been tried) AND `ideas.tsv` (scratch queue of untried ideas). Pick the top `pending` idea from the queue, set its status to `trying`, and run it. If an idea no longer makes sense given recent results, delete it and pick the next. If `ideas.tsv` is empty or has no viable ideas, clear it, **re-read `results.tsv`** to refresh what's been tried, then do a landscape scan (web search) — add 2-5 new ideas sorted by expected impact (checking each against `results.tsv` before adding), pick the top one. Write your commit message with: `Bottleneck: [what's limiting val_bpb]. Hypothesis: [change] will improve because [reason]. Evidence: [prior experiment / web search / metric]. [idea:UUID]` If you have no evidence, search the web first. **Every 5th experiment**, do a landscape scan across ALL search areas listed in `CLAUDE.md` and add promising NEW ideas to `ideas.tsv` (check `results.tsv` first — NEVER re-add a tried idea). When experiment finishes, **delete the idea row** from `ideas.tsv` (the result lives in `results.tsv`).
+0. **Plan — STRICT QUEUE DISCIPLINE (see CLAUDE.md rules 8 & 9):**
+
+   **The queue (`ideas.tsv`) is the ONLY entry point to an experiment.** You do NOT get to invent an experiment on the fly and run it. Inventing-then-running skips prioritization, bypasses user visibility, and destroys the research audit trail. This rule is absolute.
+
+   Exact sequence — execute IN ORDER:
+
+   **a. Read `results.tsv` AND `ideas.tsv`.** Re-read fully every 8+ experiments to refresh memory.
+
+   **b. Triage `ideas.tsv`:** For each `pending` idea, confirm it hasn't been ruled out by `results.tsv`. If an idea IS ruled out, delete that row AND cite the specific results.tsv commit hash that proves it in the deletion commit message. You may NOT skip an idea because it "looks low-impact" — only because results.tsv specifically rules it out. See CLAUDE.md rule 9.
+
+   **c. If during analysis you think of a NEW idea:** STOP. Before writing any code, WRITE the idea into `ideas.tsv` as a new row with ALL 7 columns filled:
+   - `id`: short-kebab-case-##
+   - `status`: `pending`
+   - `idea`: 1-line description with concrete values (e.g. "x0_lambdas init 0.2->0.4")
+   - `category`: architecture | optimizer | training-dynamics | hyperparameter | memory-throughput
+   - `impact`: low | medium | high
+   - `evidence`: cite prior exp / web search / metric
+   - `notes`: risks, expected params change, hypothesis
+
+   **d. Sort `ideas.tsv` by expected impact x probability of success.** The top `pending` row IS your next experiment. No cherry-picking.
+
+   **e. Set that row's `status` to `trying`** and commit `ideas.tsv` BEFORE running the experiment. This is your promise to the audit trail.
+
+   **f. If `ideas.tsv` has zero viable pending ideas:** do a landscape scan (web search across 3-4 of CLAUDE.md's search areas), add 2-5 new ideas (check results.tsv first — never re-add a tried idea), then go to step d.
+
+   **g. Every 5th experiment:** do a wide landscape scan across ALL CLAUDE.md search areas, add promising new ideas to `ideas.tsv`. Do NOT skip because "the queue has enough" — fresh research is required.
+
+   **h. Write your commit message with:** `Bottleneck: [X]. Hypothesis: [Y] will improve because [Z]. Evidence: [results.tsv row / web search / metric]. [idea:id-from-ideas.tsv]`
+
+   **i. When experiment finishes** (keep or discard), DELETE the row from `ideas.tsv` — the result now lives in `results.tsv`.
 
    **MANDATORY DEDUPLICATION CHECK (before EVERY experiment):**
    Before writing any code, grep `results.tsv` for keywords related to your planned change. If a similar experiment was already tried, DO NOT repeat it. Read the description of the prior attempt to understand WHY it failed, then either (a) pick a genuinely different experiment, or (b) document exactly what's different this time.
