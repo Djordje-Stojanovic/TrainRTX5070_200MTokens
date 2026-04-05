@@ -472,6 +472,9 @@ class GPT(nn.Module):
         # have hidden states h_0..h_i when entering layer i).
         attn_res_mask = torch.triu(torch.ones(config.n_layer, config.n_layer + 1), diagonal=1).bool()
         self.register_buffer("attn_res_mask", attn_res_mask, persistent=False)
+        # One-hot position masks for writing h_{i+1} into static stack at layer i.
+        pos_masks = F.one_hot(torch.arange(1, config.n_layer + 1), num_classes=config.n_layer + 1).float()
+        self.register_buffer("pos_masks", pos_masks, persistent=False)
         head_dim = config.n_embd // config.n_head
         self.rotary_seq_len = config.sequence_len
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim, dtype=config.compute_dtype)
@@ -653,18 +656,25 @@ class GPT(nn.Module):
         x0 = x
         ve = self.value_emb(idx)
         # Attention Residuals: softmax-weighted mix over all prior hidden states.
-        # [idea:attn-res-12] At layer i, mix over [x0, h_1, ..., h_i] (length i+1).
-        hs = [x0]
+        # [idea:attn-res-12] Static-shape implementation: maintain hs tensor of
+        # shape (n_layer+1, B, T, C) with zeros in unwritten slots. Softmax over
+        # the masked logits gives 0 weight to future positions, so einsum over
+        # the full static tensor is equivalent to mixing only valid entries.
+        # Writes use out-of-place additive scatter via pre-built pos_masks.
+        n_layer = self.config.n_layer
+        all_weights = F.softmax(
+            self.attn_res_weights.masked_fill(self.attn_res_mask, float('-inf')),
+            dim=-1,
+        )  # (n_layer, n_layer+1)
+        B, T, C = x0.size()
+        hs = torch.cat([x0.unsqueeze(0), x0.new_zeros(n_layer, B, T, C)], dim=0)
         for i, block in enumerate(self.transformer.h):
-            logits = self.attn_res_weights[i, :i + 1]
-            weights = F.softmax(logits, dim=0)
-            x_in = weights[0] * hs[0]
-            for j in range(1, i + 1):
-                x_in = x_in + weights[j] * hs[j]
+            x_in = torch.einsum('k,kbtc->btc', all_weights[i], hs)
             window_size = self.window_sizes[i]
             x_out = block(x_in, cos_sin, window_size, ve=ve)
-            hs.append(x_out)
-        x = norm(hs[-1])
+            m = self.pos_masks[i].to(hs.dtype).view(-1, 1, 1, 1)
+            hs = hs + m * x_out.unsqueeze(0)
+        x = norm(hs[n_layer])
 
         softcap = 15
         logits = self.lm_head(x).float()
@@ -1152,10 +1162,7 @@ def _run_training_once(runtime, tokenizer, config, device_batch_size, smoke_test
         except Exception as e2:
             print(f"FP8 not available ({e2}), using bf16")
 
-    # Compile per-block to avoid dynamic-shape issues in GPT.forward's
-    # residual-mix loop (attn-res). Blocks have static shapes.
-    for _bi in range(len(model.transformer.h)):
-        model.transformer.h[_bi] = _maybe_compile(model.transformer.h[_bi], dynamic=False)
+    model = _maybe_compile(model, dynamic=False)
 
     train_loader = make_dataloader(
         tokenizer,
