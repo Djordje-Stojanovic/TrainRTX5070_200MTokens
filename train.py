@@ -313,6 +313,7 @@ class GPTConfig:
     use_activation_checkpointing: bool = False
     compute_dtype: torch.dtype = torch.bfloat16
     mlp_only_layers: tuple = ()
+    mla_latent_dim: int = 384
 
 
 def norm(x):
@@ -341,8 +342,12 @@ class CausalSelfAttention(nn.Module):
         assert self.n_embd % self.n_head == 0
         assert self.n_kv_head <= self.n_head and self.n_head % self.n_kv_head == 0
         self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
-        self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
-        self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
+        # MLA: factorize K,V through shared low-rank latent (d_c).
+        # kv_latent = c_kv_down(x); k = c_k_up(kv_latent); v = c_v_up(kv_latent)
+        self.mla_latent_dim = config.mla_latent_dim
+        self.c_kv_down = nn.Linear(self.n_embd, self.mla_latent_dim, bias=False)
+        self.c_k_up = nn.Linear(self.mla_latent_dim, self.n_kv_head * self.head_dim, bias=False)
+        self.c_v_up = nn.Linear(self.mla_latent_dim, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
         self.ve_gate_channels = 12
         self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False)
@@ -368,8 +373,9 @@ class CausalSelfAttention(nn.Module):
     def forward(self, x, cos_sin, window_size, ve=None):
         B, T, _ = x.size()
         q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
-        k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
-        v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
+        kv_latent = self.c_kv_down(x)
+        k = self.c_k_up(kv_latent).view(B, T, self.n_kv_head, self.head_dim)
+        v = self.c_v_up(kv_latent).view(B, T, self.n_kv_head, self.head_dim)
         if ve is not None:
             ve = ve.view(B, T, self.n_kv_head, self.head_dim)
             gate = 3 * torch.sigmoid(self.ve_gate(x[..., :self.ve_gate_channels]))  # (B, T, n_kv_head)
@@ -482,8 +488,11 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             if not block.mlp_only:
                 torch.nn.init.uniform_(block.attn.c_q.weight, -s, s)
-                torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
-                torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
+                # MLA: init by fan_in (in_features for nn.Linear)
+                torch.nn.init.uniform_(block.attn.c_kv_down.weight, -s, s)  # fan_in=n_embd
+                s_up = 3 ** 0.5 * block.attn.mla_latent_dim ** -0.5
+                torch.nn.init.uniform_(block.attn.c_k_up.weight, -s_up, s_up)
+                torch.nn.init.uniform_(block.attn.c_v_up.weight, -s_up, s_up)
                 torch.nn.init.zeros_(block.attn.c_proj.weight)
                 torch.nn.init.zeros_(block.attn.ve_gate.weight)  # sigmoid(0)=0.5, gate=1.5
             torch.nn.init.uniform_(block.mlp.c_gate.weight, -s, s)
