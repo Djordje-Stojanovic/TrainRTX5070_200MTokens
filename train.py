@@ -654,17 +654,17 @@ class GPT(nn.Module):
         ve = self.value_emb(idx)
         # Attention Residuals: softmax-weighted mix over all prior hidden states.
         # [idea:attn-res-12] At layer i, mix over [x0, h_1, ..., h_i] (length i+1).
-        hs_list = [x0]
+        hs = [x0]
         for i, block in enumerate(self.transformer.h):
-            # Slice logits for valid positions and softmax-normalize.
             logits = self.attn_res_weights[i, :i + 1]
             weights = F.softmax(logits, dim=0)
-            stacked = torch.stack(hs_list, dim=0)  # (i+1, B, T, C)
-            x_in = torch.einsum('k,kbtc->btc', weights, stacked)
+            x_in = weights[0] * hs[0]
+            for j in range(1, i + 1):
+                x_in = x_in + weights[j] * hs[j]
             window_size = self.window_sizes[i]
             x_out = block(x_in, cos_sin, window_size, ve=ve)
-            hs_list.append(x_out)
-        x = norm(hs_list[-1])
+            hs.append(x_out)
+        x = norm(hs[-1])
 
         softcap = 15
         logits = self.lm_head(x).float()
@@ -1152,7 +1152,10 @@ def _run_training_once(runtime, tokenizer, config, device_batch_size, smoke_test
         except Exception as e2:
             print(f"FP8 not available ({e2}), using bf16")
 
-    model = _maybe_compile(model, dynamic=False)
+    # Compile per-block to avoid dynamic-shape issues in GPT.forward's
+    # residual-mix loop (attn-res). Blocks have static shapes.
+    for _bi in range(len(model.transformer.h)):
+        model.transformer.h[_bi] = _maybe_compile(model.transformer.h[_bi], dynamic=False)
 
     train_loader = make_dataloader(
         tokenizer,
