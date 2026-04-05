@@ -463,8 +463,15 @@ class GPT(nn.Module):
         kv_dim = config.n_kv_head * (config.n_embd // config.n_head)
         self.value_emb = nn.Embedding(config.vocab_size, kv_dim)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
-        self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
+        # Attention Residuals: softmax-weighted mix over all prior hidden states
+        # [idea:attn-res-12] replaces resid_lambdas+x0_lambdas (2-term mix) with
+        # (d+1)-term softmax mix over [x0, h_1, ..., h_i] at layer i.
+        # Shape (n_layer, n_layer+1): row i contains logits for (i+1) valid positions.
+        self.attn_res_weights = nn.Parameter(torch.zeros(config.n_layer, config.n_layer + 1))
+        # Causal mask: True where j > i (position j invalid at layer i, since we only
+        # have hidden states h_0..h_i when entering layer i).
+        attn_res_mask = torch.triu(torch.ones(config.n_layer, config.n_layer + 1), diagonal=1).bool()
+        self.register_buffer("attn_res_mask", attn_res_mask, persistent=False)
         head_dim = config.n_embd // config.n_head
         self.rotary_seq_len = config.sequence_len
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim, dtype=config.compute_dtype)
@@ -489,8 +496,12 @@ class GPT(nn.Module):
             torch.nn.init.uniform_(block.mlp.c_gate.weight, -s, s)
             torch.nn.init.uniform_(block.mlp.c_up.weight, -s, s)
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
-        self.resid_lambdas.fill_(1.0)
-        self.x0_lambdas.fill_(0.2)
+        # Init attn_res_weights: concentrate weight on the most-recent hidden state
+        # (position i at layer i) with some leakage to x0, emulating the prior
+        # resid=1.0+x0=0.2 behavior. logit=3.0 on diagonal → e^3/(e^3+i) weight on recent.
+        self.attn_res_weights.zero_()
+        diag_idx = torch.arange(self.config.n_layer)
+        self.attn_res_weights[diag_idx, diag_idx] = 3.0
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(
             self.rotary_seq_len,
@@ -532,8 +543,7 @@ class GPT(nn.Module):
         nparams_exclude = (
             self.transformer.wte.weight.numel()
             + self.value_emb.weight.numel()
-            + self.resid_lambdas.numel()
-            + self.x0_lambdas.numel()
+            + self.attn_res_weights.numel()
         )
         h = self.config.n_head
         q = self.config.n_embd // self.config.n_head
@@ -550,7 +560,7 @@ class GPT(nn.Module):
         value_emb = sum(p.numel() for p in self.value_emb.parameters())
         lm_head = sum(p.numel() for p in self.lm_head.parameters())
         transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
-        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel()
+        scalars = self.attn_res_weights.numel()
         total = wte + value_emb + lm_head + transformer_matrices + scalars
         return {
             "wte": wte,
@@ -573,16 +583,14 @@ class GPT(nn.Module):
         embedding_params = list(self.transformer.wte.parameters())
         value_emb_params = list(self.value_emb.parameters())
         lm_head_params = list(self.lm_head.parameters())
-        resid_params = [self.resid_lambdas]
-        x0_params = [self.x0_lambdas]
+        attn_res_params = [self.attn_res_weights]
         assert len(list(self.parameters())) == (
             len(matrix_params)
             + len(mlp_cproj_params)
             + len(embedding_params)
             + len(value_emb_params)
             + len(lm_head_params)
-            + len(resid_params)
-            + len(x0_params)
+            + len(attn_res_params)
         )
         # muP scaling factors (at base width MUP_BASE_WIDTH, all factors = 1.0)
         mup_embed_lr_scale = 1.0  # Input embeddings: no width scaling
@@ -595,8 +603,7 @@ class GPT(nn.Module):
             dict(kind="adamw", params=lm_head_params, lr=unembedding_lr * mup_output_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=embedding_params, lr=embedding_lr * mup_embed_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=value_emb_params, lr=embedding_lr * mup_embed_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind="adamw", params=resid_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind="adamw", params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
+            dict(kind="adamw", params=attn_res_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
         ]
         muon_group_chunk = 8
         for shape in sorted({p.shape for p in matrix_params}):
@@ -645,11 +652,21 @@ class GPT(nn.Module):
         x = norm(x)
         x0 = x
         ve = self.value_emb(idx)
+        # Attention Residuals: maintain list of hidden states [x0, h_1, ..., h_i]
+        # and mix via softmax-weighted sum per layer. [idea:attn-res-12]
+        hs = [x0]
         for i, block in enumerate(self.transformer.h):
-            x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
+            # Softmax over valid positions (0..i); mask future entries to -inf.
+            logits = self.attn_res_weights[i].masked_fill(self.attn_res_mask[i], float('-inf'))
+            weights = F.softmax(logits, dim=0)  # (n_layer+1,)
+            # Weighted sum over hs[0..i] (length i+1). Unroll for compile-friendliness.
+            x_in = weights[0] * hs[0]
+            for j in range(1, i + 1):
+                x_in = x_in + weights[j] * hs[j]
             window_size = self.window_sizes[i]
-            x = block(x, cos_sin, window_size, ve=ve)
-        x = norm(x)
+            x_out = block(x_in, cos_sin, window_size, ve=ve)
+            hs.append(x_out)
+        x = norm(hs[-1])
 
         softcap = 15
         logits = self.lm_head(x).float()
