@@ -652,21 +652,19 @@ class GPT(nn.Module):
         x = norm(x)
         x0 = x
         ve = self.value_emb(idx)
-        # Attention Residuals: maintain list of hidden states [x0, h_1, ..., h_i]
-        # and mix via softmax-weighted sum per layer. [idea:attn-res-12]
-        hs = [x0]
+        # Attention Residuals: softmax-weighted mix over all prior hidden states.
+        # [idea:attn-res-12] At layer i, mix over [x0, h_1, ..., h_i] (length i+1).
+        hs_list = [x0]
         for i, block in enumerate(self.transformer.h):
-            # Softmax over valid positions (0..i); mask future entries to -inf.
-            logits = self.attn_res_weights[i].masked_fill(self.attn_res_mask[i], float('-inf'))
-            weights = F.softmax(logits, dim=0)  # (n_layer+1,)
-            # Weighted sum over hs[0..i] (length i+1). Unroll for compile-friendliness.
-            x_in = weights[0] * hs[0]
-            for j in range(1, i + 1):
-                x_in = x_in + weights[j] * hs[j]
+            # Slice logits for valid positions and softmax-normalize.
+            logits = self.attn_res_weights[i, :i + 1]
+            weights = F.softmax(logits, dim=0)
+            stacked = torch.stack(hs_list, dim=0)  # (i+1, B, T, C)
+            x_in = torch.einsum('k,kbtc->btc', weights, stacked)
             window_size = self.window_sizes[i]
             x_out = block(x_in, cos_sin, window_size, ve=ve)
-            hs.append(x_out)
-        x = norm(hs[-1])
+            hs_list.append(x_out)
+        x = norm(hs_list[-1])
 
         softcap = 15
         logits = self.lm_head(x).float()
