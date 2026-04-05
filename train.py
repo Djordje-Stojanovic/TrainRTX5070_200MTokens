@@ -826,7 +826,7 @@ class MuonAdamW(torch.optim.Optimizer):
 MUP_BASE_WIDTH = 768
 
 # Model architecture
-ASPECT_RATIO = 48         # model_dim = depth * ASPECT_RATIO
+ASPECT_RATIO = 38         # model_dim = depth * ASPECT_RATIO (d20*38=760 rounds to 768)
 HEAD_DIM = 128            # target head dimension for attention
 WINDOW_PATTERN = "SSSL"   # sliding window on early layers, full on every 4th
 SHORT_WINDOW = 256        # short window size in tokens (modded-nanogpt uses 128-384)
@@ -844,7 +844,7 @@ WARMDOWN_RATIO = 0.0         # WSD: no decay for experiment runs (warmup + stabl
 FINAL_LR_FRAC = 0.1
 
 # Model size + memory defaults
-DEPTH = 16
+DEPTH = 20
 MLP_ONLY_LAYERS = {12, 13, 14}  # S-layers replaced with MLP-only for throughput
 DEVICE_BATCH_SIZE = 16
 EVAL_BATCH_SIZE = 8
