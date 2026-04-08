@@ -319,6 +319,16 @@ def norm(x):
     return F.rms_norm(x, (x.size(-1),))
 
 
+class GatedNorm(nn.Module):
+    """GatedNorm: sigmoid(gate) * RMSNorm(x). Mitigates residual sinks (arxiv 2601.22966)."""
+    def __init__(self, dim):
+        super().__init__()
+        self.gate = nn.Parameter(torch.empty(dim))
+
+    def forward(self, x):
+        return torch.sigmoid(self.gate) * F.rms_norm(x, (x.size(-1),))
+
+
 def apply_rotary_emb(x, cos, sin):
     assert x.ndim == 4
     rotary_dim = cos.shape[-1] * 2  # cos has half the rotary dimensions
@@ -424,7 +434,11 @@ class Block(nn.Module):
         self.mlp_only = mlp_only
         if not mlp_only:
             self.attn = CausalSelfAttention(config, layer_idx)
+            self.norm_attn_in = GatedNorm(config.n_embd)
+            self.norm_attn_out = GatedNorm(config.n_embd)
         self.mlp = MLP(config)
+        self.norm_mlp_in = GatedNorm(config.n_embd)
+        self.norm_mlp_out = GatedNorm(config.n_embd)
         self.use_mlp_checkpointing = config.use_activation_checkpointing
 
     def forward(self, x, cos_sin, window_size, ve=None):
@@ -434,20 +448,20 @@ class Block(nn.Module):
             x_prev = torch.roll(x, 1, dims=1)
             x_prev[:, 0, :] = x[:, 0, :]
             x_attn_in = torch.cat([x[:, :, :3*quarter], x_prev[:, :, 3*quarter:]], dim=-1)
-            x = x + norm(self.attn(norm(x_attn_in), cos_sin, window_size, ve=ve))
+            x = x + self.norm_attn_out(self.attn(self.norm_attn_in(x_attn_in), cos_sin, window_size, ve=ve))
         if self.mlp_only:
             # Token shift for MLP-only layers: only local context source since no attention
             quarter = x.size(-1) // 4
             x_prev = torch.roll(x, 1, dims=1)
             x_prev[:, 0, :] = x[:, 0, :]
             x_mlp_in = torch.cat([x[:, :, :3*quarter], x_prev[:, :, 3*quarter:]], dim=-1)
-            x_normed = norm(x_mlp_in)
+            x_normed = self.norm_mlp_in(x_mlp_in)
         else:
-            x_normed = norm(x)
+            x_normed = self.norm_mlp_in(x)
         if self.use_mlp_checkpointing:
-            x = x + norm(torch_checkpoint(self.mlp, x_normed, use_reentrant=False))
+            x = x + self.norm_mlp_out(torch_checkpoint(self.mlp, x_normed, use_reentrant=False))
         else:
-            x = x + norm(self.mlp(x_normed))
+            x = x + self.norm_mlp_out(self.mlp(x_normed))
         return x
 
 
@@ -463,6 +477,8 @@ class GPT(nn.Module):
         kv_dim = config.n_kv_head * (config.n_embd // config.n_head)
         self.value_emb = nn.Embedding(config.vocab_size, kv_dim)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.norm_embed = GatedNorm(config.n_embd)
+        self.norm_final = GatedNorm(config.n_embd)
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
         head_dim = config.n_embd // config.n_head
@@ -491,6 +507,10 @@ class GPT(nn.Module):
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
         self.resid_lambdas.fill_(1.0)
         self.x0_lambdas.fill_(0.2)
+        # GatedNorm gates: sigmoid(4.0) ≈ 0.982, near identity at init
+        for mod in self.modules():
+            if isinstance(mod, GatedNorm):
+                mod.gate.fill_(4.0)
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(
             self.rotary_seq_len,
@@ -565,10 +585,18 @@ class GPT(nn.Module):
                         weight_decay=0.0, adam_betas=(0.8, 0.95), scalar_lr=0.5,
                         c_proj_lr_mult=1.0):
         model_dim = self.config.n_embd
+        # Collect GatedNorm gate params (1D, need AdamW not Muon)
+        gatednorm_gate_ids = set()
+        gatednorm_params = []
+        for mod in self.modules():
+            if isinstance(mod, GatedNorm):
+                gatednorm_gate_ids.add(id(mod.gate))
+                gatednorm_params.append(mod.gate)
         # Separate MLP c_proj params for optional LR multiplier
         mlp_cproj_ids = {id(block.mlp.c_proj.weight) for block in self.transformer.h}
+        exclude_ids = mlp_cproj_ids | gatednorm_gate_ids
         all_h_params = list(self.transformer.h.parameters())
-        matrix_params = [p for p in all_h_params if id(p) not in mlp_cproj_ids]
+        matrix_params = [p for p in all_h_params if id(p) not in exclude_ids]
         mlp_cproj_params = [p for p in all_h_params if id(p) in mlp_cproj_ids]
         embedding_params = list(self.transformer.wte.parameters())
         value_emb_params = list(self.value_emb.parameters())
@@ -583,6 +611,7 @@ class GPT(nn.Module):
             + len(lm_head_params)
             + len(resid_params)
             + len(x0_params)
+            + len(gatednorm_params)
         )
         # muP scaling factors (at base width MUP_BASE_WIDTH, all factors = 1.0)
         mup_embed_lr_scale = 1.0  # Input embeddings: no width scaling
@@ -597,6 +626,7 @@ class GPT(nn.Module):
             dict(kind="adamw", params=value_emb_params, lr=embedding_lr * mup_embed_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=resid_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
+            dict(kind="adamw", params=gatednorm_params, lr=scalar_lr * 0.1, betas=adam_betas, eps=1e-10, weight_decay=0.0),
         ]
         muon_group_chunk = 8
         for shape in sorted({p.shape for p in matrix_params}):
@@ -642,14 +672,14 @@ class GPT(nn.Module):
         cos_sin = self.cos[:, :T], self.sin[:, :T]
 
         x = self.transformer.wte(idx)
-        x = norm(x)
+        x = self.norm_embed(x)
         x0 = x
         ve = self.value_emb(idx)
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             window_size = self.window_sizes[i]
             x = block(x, cos_sin, window_size, ve=ve)
-        x = norm(x)
+        x = self.norm_final(x)
 
         softcap = 15
         logits = self.lm_head(x).float()
