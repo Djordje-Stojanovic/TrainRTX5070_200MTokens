@@ -832,7 +832,7 @@ WINDOW_PATTERN = "SSSL"   # sliding window on early layers, full on every 4th
 SHORT_WINDOW = 256        # short window size in tokens (modded-nanogpt uses 128-384)
 
 # Optimization
-TOTAL_BATCH_SIZE = 2 ** 17
+TOTAL_BATCH_SIZE = 2 ** 16
 EMBEDDING_LR = 0.4
 UNEMBEDDING_LR = 0.004
 MATRIX_LR = 0.04
