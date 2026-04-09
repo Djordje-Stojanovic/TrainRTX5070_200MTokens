@@ -441,9 +441,9 @@ class Block(nn.Module):
             x_prev = torch.roll(x, 1, dims=1)
             x_prev[:, 0, :] = x[:, 0, :]
             x_mlp_in = torch.cat([x[:, :, :3*quarter], x_prev[:, :, 3*quarter:]], dim=-1)
-            x_normed = x_mlp_in  # HybridNorm: no pre-norm on MLP (post-norm only)
+            x_normed = norm(x_mlp_in)
         else:
-            x_normed = x  # HybridNorm: no pre-norm on MLP (post-norm only)
+            x_normed = norm(x)
         if self.use_mlp_checkpointing:
             x = x + norm(torch_checkpoint(self.mlp, x_normed, use_reentrant=False))
         else:
