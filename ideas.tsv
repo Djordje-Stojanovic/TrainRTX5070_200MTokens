@@ -1,2 +1,1 @@
 id	status	idea	category	impact	evidence	notes
-newton-muon-18	pending	Newton-Muon: add right preconditioning via input second moment to Muon (interpret Muon as implicit Newton method)	optimizer	medium	arxiv 2604.01472 Apr2026 'The Newton-Muon Optimizer' 6% fewer iterations and 4% wall-clock reduction on GPT-2 pretraining	Very recent paper (Apr 2026). Standard Muon neglects right preconditioning from input second moment. Newton-Muon adds this. Risk: memory cost of storing input second moment matrix per layer.
