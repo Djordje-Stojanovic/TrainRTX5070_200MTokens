@@ -708,17 +708,17 @@ def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momen
             B = b * A + c * (A @ A)
             X = a * X + B @ X
     g = X
-    # NorMuon (arxiv 2510.05491): row-wise normalization with second-order momentum
     beta2 = beta2_t.to(g.dtype)
-    v_mean = g.float().square().mean(dim=red_dim, keepdim=True)  # per-neuron mean squared
+    v_mean = g.float().square().mean(dim=red_dim, keepdim=True)
+    red_dim_size = g.size(red_dim)
+    v_norm_sq = v_mean.sum(dim=(-2, -1), keepdim=True) * red_dim_size
+    v_norm = v_norm_sq.sqrt()
     second_momentum_buffer.lerp_(v_mean.to(dtype=second_momentum_buffer.dtype), 1 - beta2)
-    # Simple row-wise normalization: O_hat = O / (sqrt(v) + eps)
-    g = g / (second_momentum_buffer.sqrt().to(g.dtype) + 1e-6)
-    # Dynamic LR scaling: eta_hat = 0.2 * eta * sqrt(m*n) / ||O_hat||_F
-    m, n = g.size(-2), g.size(-1)
-    g_norm = g.float().norm(dim=(-2, -1), keepdim=True).clamp_min(1e-6)
-    lr_scale = 0.2 * (m * n) ** 0.5 / g_norm
-    g = g * lr_scale.to(g.dtype)
+    step_size = second_momentum_buffer.clamp_min(1e-10).rsqrt()
+    scaled_sq_sum = (v_mean * red_dim_size) * step_size.float().square()
+    v_norm_new = scaled_sq_sum.sum(dim=(-2, -1), keepdim=True).sqrt()
+    final_scale = step_size * (v_norm / v_norm_new.clamp_min(1e-10))
+    g = g * final_scale.to(g.dtype)
     lr = lr_t.to(g.dtype)
     wd = wd_t.to(g.dtype)
     mask = (g * stacked_params) >= 0
