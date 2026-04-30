@@ -502,7 +502,7 @@ class GPT(nn.Module):
         self.cos, self.sin = cos, sin
         self.transformer.wte.to(dtype=embed_dtype)
 
-    def _precompute_rotary_embeddings(self, seq_len, head_dim, base=50000, device=None, dtype=torch.bfloat16):
+    def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000, device=None, dtype=torch.bfloat16):
         if device is None:
             device = self.transformer.wte.weight.device
         rotary_dim = head_dim // 2  # partial RoPE: only 50% of head dims
