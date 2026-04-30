@@ -617,6 +617,7 @@ class GPT(nn.Module):
                         momentum=0.95,
                         ns_steps=5,
                         beta2=0.98,
+                        nsr_alpha=VAM_NSR_ALPHA,
                         weight_decay=weight_decay,
                     )
                 )
@@ -634,6 +635,7 @@ class GPT(nn.Module):
                             momentum=0.95,
                             ns_steps=5,
                             beta2=0.98,
+                            nsr_alpha=VAM_NSR_ALPHA,
                             weight_decay=weight_decay,
                         )
                     )
@@ -697,10 +699,21 @@ def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_
 
 
 def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momentum_buffer,
-                    momentum_t, lr_t, wd_t, beta2_t, ns_steps, red_dim):
-    momentum = momentum_t.to(stacked_grads.dtype)
-    momentum_buffer.lerp_(stacked_grads, 1 - momentum)
+                    variance_buffer, step_t, momentum_t, lr_t, wd_t, beta2_t,
+                    nsr_alpha_t, ns_steps, red_dim):
+    momentum = momentum_t.to(device=stacked_grads.device, dtype=stacked_grads.dtype)
+    one_minus_momentum = 1 - momentum
+    prediction_error = momentum_buffer - stacked_grads
+    variance_buffer.mul_(momentum)
+    variance_buffer.add_(prediction_error.float().square() * (momentum * one_minus_momentum).float())
+    momentum_buffer.lerp_(stacked_grads, one_minus_momentum)
     g = stacked_grads.lerp_(momentum_buffer, momentum)
+    bias_correction = 1 - momentum_t ** step_t
+    bias_correction = bias_correction.to(device=stacked_grads.device, dtype=torch.float32).clamp_min(1e-8)
+    variance_hat = variance_buffer / bias_correction
+    nsr_alpha = nsr_alpha_t.to(device=stacked_grads.device, dtype=torch.float32)
+    nsr_denom = (g.float().square() + nsr_alpha * variance_hat).sqrt().clamp_min(1e-8)
+    g = (g.float() / nsr_denom).to(stacked_grads.dtype)
     X = g.to(dtype=MUON_COMPUTE_DTYPE)
     X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02 + 1e-6)
     if g.size(-2) > g.size(-1):
@@ -750,6 +763,8 @@ class MuonAdamW(torch.optim.Optimizer):
         self._muon_lr_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
         self._muon_wd_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
         self._muon_beta2_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._muon_step_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._muon_nsr_alpha_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
 
     def _step_adamw(self, group):
         for p in group["params"]:
@@ -791,9 +806,14 @@ class MuonAdamW(torch.optim.Optimizer):
         shape, device, dtype = p.shape, p.device, p.dtype
         if "momentum_buffer" not in state:
             state["momentum_buffer"] = torch.zeros(num_params, *shape, dtype=dtype, device=device)
+        if "variance_buffer" not in state:
+            state["variance_buffer"] = torch.zeros(num_params, *shape, dtype=torch.float32, device=device)
         if "second_momentum_buffer" not in state:
             state_shape = (num_params, shape[-2], 1) if shape[-2] >= shape[-1] else (num_params, 1, shape[-1])
             state["second_momentum_buffer"] = torch.zeros(state_shape, dtype=dtype, device=device)
+        if "step" not in state:
+            state["step"] = 0
+        state["step"] += 1
         red_dim = -1 if shape[-2] >= shape[-1] else -2
         stacked_grads = torch.stack([p.grad for p in params])
         stacked_params = torch.stack(params)
@@ -801,15 +821,20 @@ class MuonAdamW(torch.optim.Optimizer):
         self._muon_beta2_t.fill_(group["beta2"] if group["beta2"] is not None else 0.0)
         self._muon_lr_t.fill_(group["lr"] * max(1.0, shape[-2] / shape[-1]) ** 0.5)
         self._muon_wd_t.fill_(group["weight_decay"])
+        self._muon_step_t.fill_(state["step"])
+        self._muon_nsr_alpha_t.fill_(group["nsr_alpha"])
         MUON_STEP_IMPL(
             stacked_grads,
             stacked_params,
             state["momentum_buffer"],
             state["second_momentum_buffer"],
+            state["variance_buffer"],
+            self._muon_step_t,
             self._muon_momentum_t,
             self._muon_lr_t,
             self._muon_wd_t,
             self._muon_beta2_t,
+            self._muon_nsr_alpha_t,
             group["ns_steps"],
             red_dim,
         )
@@ -845,6 +870,7 @@ MATRIX_LR = 0.04
 SCALAR_LR = 0.5
 WEIGHT_DECAY = 0.0
 ADAM_BETAS = (0.8, 0.95)
+VAM_NSR_ALPHA = 1000.0
 WARMUP_RATIO = 0.05
 WARMDOWN_RATIO = 0.0         # WSD: no decay for experiment runs (warmup + stable only)
 FINAL_LR_FRAC = 0.1
