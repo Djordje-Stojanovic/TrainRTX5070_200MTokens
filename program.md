@@ -2,7 +2,7 @@
 
 This is an experiment to have the LLM do its own research.
 
-> **Start here:** Read `CLAUDE.md` for project context, architecture overview, file map, and fairness rules.
+> **Start here:** Read `AGENTS.md` for GPT Codex / ChatGPT or `CLAUDE.md` for Claude Code Opus. Both contain the project context, architecture overview, file map, and fairness rules.
 
 ## Setup
 
@@ -11,7 +11,7 @@ To set up a new experiment, work with the user to:
 1. **Agree on a run tag**: propose a tag based on today's date (e.g. `apr03`). The branch `autoresearch/apr03` must not already exist — this is a fresh run.
 2. **Create the branch**: `git checkout -b autoresearch/apr03` from current main.
 3. **Read the in-scope files**: The repo is small. Read these files for full context:
-   - `CLAUDE.md` — project context, what you can/can't change, fairness rules.
+   - `AGENTS.md` / `CLAUDE.md` — project context, what you can/can't change, fairness rules.
    - `train.py` — model architecture (SwiGLU d16, ~200M params), optimizer (Muon+AdamW), training loop.
    - `prepare.py` — data pipeline (ClimbMix + GPT-2 tokenizer), dataloader, evaluation.
 4. **Verify data exists**: Check that the cache directory contains ClimbMix shards and a tokenizer. If not, tell the human to run `uv run prepare.py --dataset climbmix`.
@@ -24,7 +24,7 @@ Once you get confirmation, kick off the experimentation.
 
 Each experiment runs on a single RTX 5070 (12GB). The training script runs for a **fixed token budget of 200M tokens** (~1526 steps at TOTAL_BATCH_SIZE=2^17, roughly ~50 minutes wall clock). You launch it simply as: `uv run train.py`.
 
-**What you CAN change** (see `CLAUDE.md` for details):
+**What you CAN change** (see `AGENTS.md` / `CLAUDE.md` for details):
 - `train.py` — primary edit target. Architecture, optimizer, hyperparameters, training loop, batch size, model size. Everything is fair game.
 - `prepare.py` — dataloader efficiency improvements are allowed. But do not touch the fairness invariants (see below).
 - `pyproject.toml` — add a dependency only if it enables a real optimization.
@@ -125,7 +125,7 @@ The experiment runs on a dedicated branch (e.g. `autoresearch/apr03`).
 
 LOOP FOREVER:
 
-0. **Plan — STRICT QUEUE DISCIPLINE (see CLAUDE.md rules 8 & 9):**
+0. **Plan — STRICT QUEUE DISCIPLINE (see `AGENTS.md` / `CLAUDE.md` rules 8 & 9):**
 
    **The queue (`ideas.tsv`) is the ONLY entry point to an experiment.** You do NOT get to invent an experiment on the fly and run it. Inventing-then-running skips prioritization, bypasses user visibility, and destroys the research audit trail. This rule is absolute.
 
@@ -133,7 +133,7 @@ LOOP FOREVER:
 
    **a. Read `results.tsv` AND `ideas.tsv`.** Re-read fully every 8+ experiments to refresh memory.
 
-   **b. Triage `ideas.tsv`:** For each `pending` idea, confirm it hasn't been ruled out by `results.tsv`. If an idea IS ruled out, delete that row AND cite the specific results.tsv commit hash that proves it in the deletion commit message. You may NOT skip an idea because it "looks low-impact" — only because results.tsv specifically rules it out. See CLAUDE.md rule 9.
+   **b. Triage `ideas.tsv`:** For each `pending` idea, confirm it hasn't been ruled out by `results.tsv`. If an idea IS ruled out, delete that row AND cite the specific results.tsv commit hash that proves it in the deletion commit message. You may NOT skip an idea because it "looks low-impact" — only because results.tsv specifically rules it out. See `AGENTS.md` / `CLAUDE.md` rule 9.
 
    **c. If during analysis you think of a NEW idea:** STOP. Before writing any code, APPEND the idea to the BOTTOM of `ideas.tsv` (never insert at top) as a new row with ALL 7 columns filled:
    - `id`: short-kebab-case-##
@@ -144,13 +144,13 @@ LOOP FOREVER:
    - `evidence`: cite prior exp / web search / metric
    - `notes`: risks, expected params change, hypothesis
 
-   **d. STRICT FIFO — NO SORTING.** `ideas.tsv` is append-only. New ideas go to the BOTTOM. The next experiment is ALWAYS the OLDEST `pending` row (topmost). Do NOT reorder by impact. Do NOT skip older ideas for newer ones. You may only skip an older idea by ruling it out per CLAUDE.md rule 9 (citing specific results.tsv evidence) and deleting it. No cherry-picking.
+   **d. STRICT FIFO — NO SORTING.** `ideas.tsv` is append-only. New ideas go to the BOTTOM. The next experiment is ALWAYS the OLDEST `pending` row (topmost). Do NOT reorder by impact. Do NOT skip older ideas for newer ones. You may only skip an older idea by ruling it out per `AGENTS.md` / `CLAUDE.md` rule 9 (citing specific results.tsv evidence) and deleting it. No cherry-picking.
 
    **e. Set that row's `status` to `trying`** and commit `ideas.tsv` BEFORE running the experiment. This is your promise to the audit trail.
 
-   **f. If `ideas.tsv` has zero viable pending ideas:** do a landscape scan (web search across 3-4 of CLAUDE.md's search areas), add 2-5 new ideas (check results.tsv first — never re-add a tried idea), then go to step d.
+   **f. If `ideas.tsv` has zero viable pending ideas:** do a landscape scan (web search across 3-4 of the search areas listed in `AGENTS.md` / `CLAUDE.md`), add 2-5 new ideas (check results.tsv first — never re-add a tried idea), then go to step d.
 
-   **g. Every 5th experiment:** do a wide landscape scan across ALL CLAUDE.md search areas, add promising new ideas to `ideas.tsv`. Do NOT skip because "the queue has enough" — fresh research is required.
+   **g. Every 5th experiment:** do a wide landscape scan across ALL search areas listed in `AGENTS.md` / `CLAUDE.md`, add promising new ideas to `ideas.tsv`. Do NOT skip because "the queue has enough" — fresh research is required.
 
    **h. Write your commit message with:** `Bottleneck: [X]. Hypothesis: [Y] will improve because [Z]. Evidence: [results.tsv row / web search / metric]. [idea:id-from-ideas.tsv]`
 
@@ -159,7 +159,7 @@ LOOP FOREVER:
    **MANDATORY DEDUPLICATION CHECK (before EVERY experiment):**
    Before writing any code, grep `results.tsv` for keywords related to your planned change. If a similar experiment was already tried, DO NOT repeat it. Read the description of the prior attempt to understand WHY it failed, then either (a) pick a genuinely different experiment, or (b) document exactly what's different this time.
 1. `git pull origin autoresearch/apr03` — pick up any doc updates pushed between experiments.
-2. Make your experimental change (primarily `train.py`, but other files if needed per the rules in `CLAUDE.md`).
+2. Make your experimental change (primarily `train.py`, but other files if needed per the rules in `AGENTS.md` / `CLAUDE.md`).
 3. git commit (with the hypothesis from step 0 in the message)
 4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
 5. Read out the results: `grep "^val_bpb:\|^peak_vram_mb:\|^mfu_percent:\|^training_seconds:" run.log`

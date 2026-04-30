@@ -17,17 +17,17 @@ This project redesigns the autoresearch loop so that 1-hour findings **scale to 
 ## Start the AI agent
 
 ```
-Read @CLAUDE.md and @program.md fully. These are your operating instructions — follow them in detail.
+Read @AGENTS.md, @CLAUDE.md, and @program.md fully. These are your operating instructions — follow them in detail.
 Read @results.tsv to see what's been tried. Read @ideas.tsv for queued ideas.
 Read @train.py and @prepare.py to understand the current architecture.
 
 You are on the autoresearch/apr03 branch. git pull origin autoresearch/apr03 first.
 Do a landscape scan (web search) before your first experiment.
 Ultrathink. Don't repeat what's already been tried. Be creative — try genuinely novel ideas.
-Run the experiment loop forever. Follow CLAUDE.md and program.md precisely.
+Run the experiment loop forever. Follow AGENTS.md / CLAUDE.md and program.md precisely.
 ```
 
-Paste this into Claude Code (with bypass permissions on). Monitor in two PowerShell windows:
+Paste this into GPT Codex / ChatGPT or Claude Code Opus (with bypass permissions on). Monitor in two PowerShell windows:
 
 ```powershell
 # Window 1 — training steps (pick one)
@@ -61,6 +61,7 @@ train.py        — model + training loop (AI modifies this)
 prepare.py      — data pipeline, tokenizer, evaluation (fairness-locked)
 program.md      — experiment loop protocol (AI follows this)
 CLAUDE.md       — project context + rules for AI agents
+AGENTS.md       — same context + rules for GPT Codex / ChatGPT agents
 results.tsv     — experiment log (all metrics, all experiments)
 ideas.tsv       — scratch queue of untried experiment ideas
 plot_results.py — generates progress.png (experiment progress chart)

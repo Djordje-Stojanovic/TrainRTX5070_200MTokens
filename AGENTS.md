@@ -1,4 +1,4 @@
-# CLAUDE.md / AGENTS.md — Project Context for AI Agents
+# AGENTS.md / CLAUDE.md — Project Context for AI Agents
 
 ## MANDATORY RULES (read these FIRST, violating ANY is a critical bug)
 
@@ -80,8 +80,8 @@ Read **`program.md`** for the full experiment loop protocol, logging format, and
 ## File Map
 
 ```
-CLAUDE.md       — YOU ARE HERE for Claude Code Opus. Project context for AI agents.
-AGENTS.md       — Same project context for GPT Codex / ChatGPT agents.
+AGENTS.md       — YOU ARE HERE for GPT Codex / ChatGPT agents. Project context for AI agents.
+CLAUDE.md       — Same project context for Claude Code Opus.
 program.md      — Experiment loop protocol. READ THIS FIRST.
 train.py        — Model, optimizer, training loop. PRIMARY EDIT TARGET.
 prepare.py      — Data pipeline, tokenizer, evaluation, constants.
