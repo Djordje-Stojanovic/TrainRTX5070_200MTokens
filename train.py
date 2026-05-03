@@ -313,7 +313,6 @@ class GPTConfig:
     use_activation_checkpointing: bool = False
     compute_dtype: torch.dtype = torch.bfloat16
     mlp_only_layers: tuple = ()
-    value_emb_banks: int = 1
 
 
 def norm(x):
@@ -462,10 +461,7 @@ class GPT(nn.Module):
             "h": nn.ModuleList([Block(config, i, mlp_only=(i in config.mlp_only_layers)) for i in range(config.n_layer)]),
         })
         kv_dim = config.n_kv_head * (config.n_embd // config.n_head)
-        self.value_emb = nn.ModuleList([
-            nn.Embedding(config.vocab_size, kv_dim)
-            for _ in range(config.value_emb_banks)
-        ])
+        self.value_emb = nn.Embedding(config.vocab_size, kv_dim)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
@@ -480,8 +476,7 @@ class GPT(nn.Module):
     def init_weights(self, embed_dtype=torch.bfloat16):
         n_embd = self.config.n_embd
         torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=1.0)
-        for value_emb in self.value_emb:
-            torch.nn.init.normal_(value_emb.weight, mean=0.0, std=0.02)
+        torch.nn.init.normal_(self.value_emb.weight, mean=0.0, std=0.02)
         lm_head_std = 1.0 / n_embd  # muP: output layer init scales as 1/width
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=lm_head_std)
         s = 3 ** 0.5 * n_embd ** -0.5
@@ -538,7 +533,7 @@ class GPT(nn.Module):
         nparams = sum(p.numel() for p in self.parameters())
         nparams_exclude = (
             self.transformer.wte.weight.numel()
-            + sum(p.numel() for p in self.value_emb.parameters())
+            + self.value_emb.weight.numel()
             + self.resid_lambdas.numel()
             + self.x0_lambdas.numel()
             + self.logit_mult.numel()
@@ -655,11 +650,10 @@ class GPT(nn.Module):
         x = self.transformer.wte(idx)
         x = norm(x)
         x0 = x
-        ve_banks = [value_emb(idx) for value_emb in self.value_emb]
+        ve = self.value_emb(idx)
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             window_size = self.window_sizes[i]
-            ve = ve_banks[min(len(ve_banks) - 1, i * len(ve_banks) // self.config.n_layer)]
             x = block(x, cos_sin, window_size, ve=ve)
         x = norm(x)
 
@@ -842,7 +836,6 @@ ASPECT_RATIO = 38         # model_dim = depth * ASPECT_RATIO (d20*38=760 rounds 
 HEAD_DIM = 128            # target head dimension for attention
 WINDOW_PATTERN = "SSSL"   # sliding window on early layers, full on every 4th
 SHORT_WINDOW = 256        # short window size in tokens (modded-nanogpt uses 128-384)
-VALUE_EMB_BANKS = 3
 
 # Optimization
 TOTAL_BATCH_SIZE = 2 ** 17
@@ -882,7 +875,6 @@ def build_model_config(depth, vocab_size, runtime, use_activation_checkpointing=
         use_activation_checkpointing=use_activation_checkpointing,
         compute_dtype=runtime.amp_dtype,
         mlp_only_layers=tuple(MLP_ONLY_LAYERS) if MLP_ONLY_LAYERS else (),
-        value_emb_banks=VALUE_EMB_BANKS,
     )
 
 
