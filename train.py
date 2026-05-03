@@ -466,6 +466,7 @@ class GPT(nn.Module):
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
         self.logit_mult = nn.Parameter(torch.ones(1))
+        self.backout_alpha = nn.Parameter(torch.zeros(1))
         head_dim = config.n_embd // config.n_head
         self.rotary_seq_len = config.sequence_len
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim, dtype=config.compute_dtype)
@@ -493,6 +494,7 @@ class GPT(nn.Module):
         self.resid_lambdas.fill_(1.0)
         self.x0_lambdas.fill_(0.2)
         self.logit_mult.fill_(1.0)
+        self.backout_alpha.fill_(0.0)
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(
             self.rotary_seq_len,
@@ -537,6 +539,7 @@ class GPT(nn.Module):
             + self.resid_lambdas.numel()
             + self.x0_lambdas.numel()
             + self.logit_mult.numel()
+            + self.backout_alpha.numel()
         )
         h = self.config.n_head
         q = self.config.n_embd // self.config.n_head
@@ -553,7 +556,12 @@ class GPT(nn.Module):
         value_emb = sum(p.numel() for p in self.value_emb.parameters())
         lm_head = sum(p.numel() for p in self.lm_head.parameters())
         transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
-        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.logit_mult.numel()
+        scalars = (
+            self.resid_lambdas.numel()
+            + self.x0_lambdas.numel()
+            + self.logit_mult.numel()
+            + self.backout_alpha.numel()
+        )
         total = wte + value_emb + lm_head + transformer_matrices + scalars
         return {
             "wte": wte,
@@ -579,6 +587,7 @@ class GPT(nn.Module):
         resid_params = [self.resid_lambdas]
         x0_params = [self.x0_lambdas]
         logit_mult_params = [self.logit_mult]
+        backout_params = [self.backout_alpha]
         assert len(list(self.parameters())) == (
             len(matrix_params)
             + len(mlp_cproj_params)
@@ -588,6 +597,7 @@ class GPT(nn.Module):
             + len(resid_params)
             + len(x0_params)
             + len(logit_mult_params)
+            + len(backout_params)
         )
         # muP scaling factors (at base width MUP_BASE_WIDTH, all factors = 1.0)
         mup_embed_lr_scale = 1.0  # Input embeddings: no width scaling
@@ -603,6 +613,7 @@ class GPT(nn.Module):
             dict(kind="adamw", params=resid_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=logit_mult_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+            dict(kind="adamw", params=backout_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
         ]
         muon_group_chunk = 8
         for shape in sorted({p.shape for p in matrix_params}):
@@ -651,10 +662,15 @@ class GPT(nn.Module):
         x = norm(x)
         x0 = x
         ve = self.value_emb(idx)
+        backout = None
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             window_size = self.window_sizes[i]
             x = block(x, cos_sin, window_size, ve=ve)
+            if i == BACKOUT_LAYER:
+                backout = x
+        if backout is not None:
+            x = x + self.backout_alpha * backout
         x = norm(x)
 
         softcap = 15
@@ -852,6 +868,7 @@ FINAL_LR_FRAC = 0.1
 # Model size + memory defaults
 DEPTH = 20
 MLP_ONLY_LAYERS = {12, 13, 14}  # S-layers replaced with MLP-only for throughput
+BACKOUT_LAYER = 11
 DEVICE_BATCH_SIZE = 16
 EVAL_BATCH_SIZE = 8
 
