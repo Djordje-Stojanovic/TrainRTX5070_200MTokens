@@ -466,7 +466,6 @@ class GPT(nn.Module):
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
         self.logit_mult = nn.Parameter(torch.ones(1))
-        self.register_buffer("mtp_weight", torch.zeros((), dtype=torch.float32), persistent=False)
         head_dim = config.n_embd // config.n_head
         self.rotary_seq_len = config.sequence_len
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim, dtype=config.compute_dtype)
@@ -494,7 +493,6 @@ class GPT(nn.Module):
         self.resid_lambdas.fill_(1.0)
         self.x0_lambdas.fill_(0.2)
         self.logit_mult.fill_(1.0)
-        self.mtp_weight.zero_()
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(
             self.rotary_seq_len,
@@ -670,14 +668,6 @@ class GPT(nn.Module):
                 ignore_index=-1,
                 reduction=reduction,
             )
-            if reduction == "mean" and self.training:
-                mtp_loss = F.cross_entropy(
-                    logits[:, :-1].float().reshape(-1, logits.size(-1)),
-                    targets[:, 1:].reshape(-1),
-                    ignore_index=-1,
-                    reduction="mean",
-                )
-                loss = loss + self.mtp_weight.to(loss.dtype) * mtp_loss
             return loss
         return logits
 
@@ -856,7 +846,6 @@ SCALAR_LR = 0.5
 WEIGHT_DECAY = 0.0
 ADAM_BETAS = (0.8, 0.95)
 WARMUP_RATIO = 0.05
-MTP_MAX_WEIGHT = 0.3
 WARMDOWN_RATIO = 0.0         # WSD: no decay for experiment runs (warmup + stable only)
 FINAL_LR_FRAC = 0.1
 
@@ -1093,11 +1082,6 @@ def _configure_step_kernels(runtime):
     USE_COMPILE = True
 
 
-def _set_mtp_weight(model, value):
-    target = getattr(model, "_orig_mod", model)
-    target.mtp_weight.fill_(float(value))
-
-
 def _run_training_once(runtime, tokenizer, config, device_batch_size, smoke_test):
     t_start = time.time()
     torch.manual_seed(42)
@@ -1201,9 +1185,6 @@ def _run_training_once(runtime, tokenizer, config, device_batch_size, smoke_test
     while True:
         torch.cuda.synchronize()
         t0 = time.time()
-        step_progress = min((step * TOTAL_BATCH_SIZE) / max(target_tokens, 1), 1.0)
-        mtp_w = MTP_MAX_WEIGHT * min(step_progress / WARMUP_RATIO, 1.0) if WARMUP_RATIO > 0 else MTP_MAX_WEIGHT
-        _set_mtp_weight(model, mtp_w)
         for _ in range(grad_accum_steps):
             with autocast_ctx:
                 loss = model(x, y)
@@ -1380,7 +1361,6 @@ def main():
 
     model = result["model"]
     _save_pre_eval_checkpoint(model)
-    _set_mtp_weight(model, 0.0)
     model.eval()
 
     eval_tokens = max(MAX_SEQ_LEN * chosen_train_batch * 2, 8192) if args.smoke_test else EVAL_TOKENS
