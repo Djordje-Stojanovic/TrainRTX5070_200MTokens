@@ -313,7 +313,6 @@ class GPTConfig:
     use_activation_checkpointing: bool = False
     compute_dtype: torch.dtype = torch.bfloat16
     mlp_only_layers: tuple = ()
-    bigram_hash_buckets: int = 0
 
 
 def norm(x):
@@ -461,7 +460,6 @@ class GPT(nn.Module):
             "wte": nn.Embedding(config.vocab_size, config.n_embd),
             "h": nn.ModuleList([Block(config, i, mlp_only=(i in config.mlp_only_layers)) for i in range(config.n_layer)]),
         })
-        self.bigram_emb = nn.Embedding(config.bigram_hash_buckets, config.n_embd) if config.bigram_hash_buckets > 0 else None
         kv_dim = config.n_kv_head * (config.n_embd // config.n_head)
         self.value_emb = nn.Embedding(config.vocab_size, kv_dim)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -478,8 +476,6 @@ class GPT(nn.Module):
     def init_weights(self, embed_dtype=torch.bfloat16):
         n_embd = self.config.n_embd
         torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=1.0)
-        if self.bigram_emb is not None:
-            torch.nn.init.normal_(self.bigram_emb.weight, mean=0.0, std=0.02)
         torch.nn.init.normal_(self.value_emb.weight, mean=0.0, std=0.02)
         lm_head_std = 1.0 / n_embd  # muP: output layer init scales as 1/width
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=lm_head_std)
@@ -505,8 +501,6 @@ class GPT(nn.Module):
         )
         self.cos, self.sin = cos, sin
         self.transformer.wte.to(dtype=embed_dtype)
-        if self.bigram_emb is not None:
-            self.bigram_emb.to(dtype=embed_dtype)
 
     def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000, device=None, dtype=torch.bfloat16):
         if device is None:
@@ -539,7 +533,6 @@ class GPT(nn.Module):
         nparams = sum(p.numel() for p in self.parameters())
         nparams_exclude = (
             self.transformer.wte.weight.numel()
-            + (self.bigram_emb.weight.numel() if self.bigram_emb is not None else 0)
             + self.value_emb.weight.numel()
             + self.resid_lambdas.numel()
             + self.x0_lambdas.numel()
@@ -557,15 +550,13 @@ class GPT(nn.Module):
 
     def num_scaling_params(self):
         wte = sum(p.numel() for p in self.transformer.wte.parameters())
-        bigram_emb = sum(p.numel() for p in self.bigram_emb.parameters()) if self.bigram_emb is not None else 0
         value_emb = sum(p.numel() for p in self.value_emb.parameters())
         lm_head = sum(p.numel() for p in self.lm_head.parameters())
         transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
         scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.logit_mult.numel()
-        total = wte + bigram_emb + value_emb + lm_head + transformer_matrices + scalars
+        total = wte + value_emb + lm_head + transformer_matrices + scalars
         return {
             "wte": wte,
-            "bigram_emb": bigram_emb,
             "value_emb": value_emb,
             "lm_head": lm_head,
             "transformer_matrices": transformer_matrices,
@@ -583,8 +574,6 @@ class GPT(nn.Module):
         matrix_params = [p for p in all_h_params if id(p) not in mlp_cproj_ids]
         mlp_cproj_params = [p for p in all_h_params if id(p) in mlp_cproj_ids]
         embedding_params = list(self.transformer.wte.parameters())
-        if self.bigram_emb is not None:
-            embedding_params += list(self.bigram_emb.parameters())
         value_emb_params = list(self.value_emb.parameters())
         lm_head_params = list(self.lm_head.parameters())
         resid_params = [self.resid_lambdas]
@@ -659,11 +648,6 @@ class GPT(nn.Module):
         cos_sin = self.cos[:, :T], self.sin[:, :T]
 
         x = self.transformer.wte(idx)
-        if self.bigram_emb is not None:
-            prev_idx = torch.roll(idx, 1, dims=1)
-            prev_idx[:, 0] = idx[:, 0]
-            bigram_hash = ((prev_idx * 1_315_423_911) ^ idx) & (self.config.bigram_hash_buckets - 1)
-            x = x + self.bigram_emb(bigram_hash)
         x = norm(x)
         x0 = x
         ve = self.value_emb(idx)
@@ -852,7 +836,6 @@ ASPECT_RATIO = 38         # model_dim = depth * ASPECT_RATIO (d20*38=760 rounds 
 HEAD_DIM = 128            # target head dimension for attention
 WINDOW_PATTERN = "SSSL"   # sliding window on early layers, full on every 4th
 SHORT_WINDOW = 256        # short window size in tokens (modded-nanogpt uses 128-384)
-BIGRAM_HASH_BUCKETS = 2 ** 16
 
 # Optimization
 TOTAL_BATCH_SIZE = 2 ** 17
@@ -892,7 +875,6 @@ def build_model_config(depth, vocab_size, runtime, use_activation_checkpointing=
         use_activation_checkpointing=use_activation_checkpointing,
         compute_dtype=runtime.amp_dtype,
         mlp_only_layers=tuple(MLP_ONLY_LAYERS) if MLP_ONLY_LAYERS else (),
-        bigram_hash_buckets=BIGRAM_HASH_BUCKETS,
     )
 
 
