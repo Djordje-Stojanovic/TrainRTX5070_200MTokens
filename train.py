@@ -344,6 +344,8 @@ class CausalSelfAttention(nn.Module):
         self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.c_q.weight._muon_head_groups = self.n_head
+        self.c_k.weight._muon_head_groups = self.n_kv_head
         self.ve_gate_channels = 12
         self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False)
         # QK-norm makes attention logits width-invariant already, so muP 1/d scaling
@@ -572,6 +574,8 @@ class GPT(nn.Module):
         mlp_cproj_ids = {id(block.mlp.c_proj.weight) for block in self.transformer.h}
         all_h_params = list(self.transformer.h.parameters())
         matrix_params = [p for p in all_h_params if id(p) not in mlp_cproj_ids]
+        qk_head_params = [p for p in matrix_params if getattr(p, "_muon_head_groups", 1) > 1]
+        matrix_params = [p for p in matrix_params if getattr(p, "_muon_head_groups", 1) <= 1]
         mlp_cproj_params = [p for p in all_h_params if id(p) in mlp_cproj_ids]
         embedding_params = list(self.transformer.wte.parameters())
         value_emb_params = list(self.value_emb.parameters())
@@ -605,6 +609,25 @@ class GPT(nn.Module):
             dict(kind="adamw", params=logit_mult_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
         ]
         muon_group_chunk = 8
+        for shape, head_groups in sorted({(p.shape, getattr(p, "_muon_head_groups", 1)) for p in qk_head_params}):
+            group_params = [
+                p for p in qk_head_params
+                if p.shape == shape and getattr(p, "_muon_head_groups", 1) == head_groups
+            ]
+            for ci in range(0, len(group_params), muon_group_chunk):
+                chunk = group_params[ci:ci + muon_group_chunk]
+                param_groups.append(
+                    dict(
+                        kind="muon",
+                        params=chunk,
+                        lr=matrix_lr * mup_muon_lr_scale,
+                        momentum=0.95,
+                        ns_steps=5,
+                        beta2=0.98,
+                        weight_decay=weight_decay,
+                        head_groups=head_groups,
+                    )
+                )
         for shape in sorted({p.shape for p in matrix_params}):
             group_params = [p for p in matrix_params if p.shape == shape]
             for ci in range(0, len(group_params), muon_group_chunk):
@@ -789,17 +812,32 @@ class MuonAdamW(torch.optim.Optimizer):
         state = self.state[p]
         num_params = len(params)
         shape, device, dtype = p.shape, p.device, p.dtype
+        head_groups = group.get("head_groups", 1)
+        if head_groups > 1:
+            assert shape[0] % head_groups == 0
+            effective_shape = (shape[0] // head_groups, shape[1])
+            num_matrices = num_params * head_groups
+        else:
+            effective_shape = shape
+            num_matrices = num_params
         if "momentum_buffer" not in state:
-            state["momentum_buffer"] = torch.zeros(num_params, *shape, dtype=dtype, device=device)
+            state["momentum_buffer"] = torch.zeros(num_matrices, *effective_shape, dtype=dtype, device=device)
         if "second_momentum_buffer" not in state:
-            state_shape = (num_params, shape[-2], 1) if shape[-2] >= shape[-1] else (num_params, 1, shape[-1])
+            state_shape = (
+                (num_matrices, effective_shape[-2], 1)
+                if effective_shape[-2] >= effective_shape[-1]
+                else (num_matrices, 1, effective_shape[-1])
+            )
             state["second_momentum_buffer"] = torch.zeros(state_shape, dtype=dtype, device=device)
-        red_dim = -1 if shape[-2] >= shape[-1] else -2
+        red_dim = -1 if effective_shape[-2] >= effective_shape[-1] else -2
         stacked_grads = torch.stack([p.grad for p in params])
         stacked_params = torch.stack(params)
+        if head_groups > 1:
+            stacked_grads = stacked_grads.view(num_matrices, *effective_shape)
+            stacked_params = stacked_params.view(num_matrices, *effective_shape)
         self._muon_momentum_t.fill_(group["momentum"])
         self._muon_beta2_t.fill_(group["beta2"] if group["beta2"] is not None else 0.0)
-        self._muon_lr_t.fill_(group["lr"] * max(1.0, shape[-2] / shape[-1]) ** 0.5)
+        self._muon_lr_t.fill_(group["lr"] * max(1.0, effective_shape[-2] / effective_shape[-1]) ** 0.5)
         self._muon_wd_t.fill_(group["weight_decay"])
         MUON_STEP_IMPL(
             stacked_grads,
@@ -813,6 +851,8 @@ class MuonAdamW(torch.optim.Optimizer):
             group["ns_steps"],
             red_dim,
         )
+        if head_groups > 1:
+            stacked_params = stacked_params.view(num_params, *shape)
         torch._foreach_copy_(params, list(stacked_params.unbind(0)))
 
     @torch.no_grad()
