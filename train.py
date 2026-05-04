@@ -834,7 +834,6 @@ MUP_BASE_WIDTH = 768
 # Model architecture
 ASPECT_RATIO = 38         # model_dim = depth * ASPECT_RATIO (d20*38=760 rounds to 768)
 HEAD_DIM = 128            # target head dimension for attention
-KV_HEADS = 3              # grouped-query attention: share K/V across pairs of Q heads
 WINDOW_PATTERN = "SSSL"   # sliding window on early layers, full on every 4th
 SHORT_WINDOW = 256        # short window size in tokens (modded-nanogpt uses 128-384)
 
@@ -868,7 +867,7 @@ def build_model_config(depth, vocab_size, runtime, use_activation_checkpointing=
         vocab_size=vocab_size,
         n_layer=depth,
         n_head=num_heads,
-        n_kv_head=KV_HEADS,
+        n_kv_head=num_heads,
         n_embd=model_dim,
         window_pattern=WINDOW_PATTERN,
         short_window=SHORT_WINDOW,
