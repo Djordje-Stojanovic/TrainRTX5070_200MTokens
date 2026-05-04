@@ -418,6 +418,21 @@ class MLP(nn.Module):
         return self.c_proj(F.silu(self.c_gate(x)) * self.c_up(x))
 
 
+class TokenLookupAdapter(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.lookup = nn.Embedding(L3_LOOKUP_BUCKETS, L3_LOOKUP_DIM)
+        self.gate = nn.Linear(config.n_embd, 1, bias=False)
+        self.proj = nn.Linear(L3_LOOKUP_DIM, config.n_embd, bias=False)
+        self.alpha = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x, token_ids):
+        lookup_ids = token_ids.remainder(self.lookup.num_embeddings)
+        memory = self.lookup(lookup_ids)
+        gate = torch.sigmoid(self.gate(norm(x)))
+        return x + self.alpha * gate * norm(self.proj(memory))
+
+
 class Block(nn.Module):
     def __init__(self, config, layer_idx, mlp_only=False):
         super().__init__()
@@ -462,6 +477,7 @@ class GPT(nn.Module):
         })
         kv_dim = config.n_kv_head * (config.n_embd // config.n_head)
         self.value_emb = nn.Embedding(config.vocab_size, kv_dim)
+        self.l3_lookup = TokenLookupAdapter(config)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
@@ -477,9 +493,12 @@ class GPT(nn.Module):
         n_embd = self.config.n_embd
         torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=1.0)
         torch.nn.init.normal_(self.value_emb.weight, mean=0.0, std=0.02)
+        torch.nn.init.normal_(self.l3_lookup.lookup.weight, mean=0.0, std=0.02)
+        torch.nn.init.zeros_(self.l3_lookup.gate.weight)
         lm_head_std = 1.0 / n_embd  # muP: output layer init scales as 1/width
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=lm_head_std)
         s = 3 ** 0.5 * n_embd ** -0.5
+        torch.nn.init.uniform_(self.l3_lookup.proj.weight, -s, s)
         for block in self.transformer.h:
             if not block.mlp_only:
                 torch.nn.init.uniform_(block.attn.c_q.weight, -s, s)
@@ -493,6 +512,7 @@ class GPT(nn.Module):
         self.resid_lambdas.fill_(1.0)
         self.x0_lambdas.fill_(0.2)
         self.logit_mult.fill_(1.0)
+        self.l3_lookup.alpha.zero_()
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(
             self.rotary_seq_len,
@@ -534,9 +554,11 @@ class GPT(nn.Module):
         nparams_exclude = (
             self.transformer.wte.weight.numel()
             + self.value_emb.weight.numel()
+            + self.l3_lookup.lookup.weight.numel()
             + self.resid_lambdas.numel()
             + self.x0_lambdas.numel()
             + self.logit_mult.numel()
+            + self.l3_lookup.alpha.numel()
         )
         h = self.config.n_head
         q = self.config.n_embd // self.config.n_head
@@ -551,13 +573,19 @@ class GPT(nn.Module):
     def num_scaling_params(self):
         wte = sum(p.numel() for p in self.transformer.wte.parameters())
         value_emb = sum(p.numel() for p in self.value_emb.parameters())
+        l3_lookup = (
+            self.l3_lookup.lookup.weight.numel()
+            + self.l3_lookup.gate.weight.numel()
+            + self.l3_lookup.proj.weight.numel()
+        )
         lm_head = sum(p.numel() for p in self.lm_head.parameters())
         transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
-        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.logit_mult.numel()
-        total = wte + value_emb + lm_head + transformer_matrices + scalars
+        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.logit_mult.numel() + self.l3_lookup.alpha.numel()
+        total = wte + value_emb + l3_lookup + lm_head + transformer_matrices + scalars
         return {
             "wte": wte,
             "value_emb": value_emb,
+            "l3_lookup": l3_lookup,
             "lm_head": lm_head,
             "transformer_matrices": transformer_matrices,
             "scalars": scalars,
@@ -571,23 +599,28 @@ class GPT(nn.Module):
         # Separate MLP c_proj params for optional LR multiplier
         mlp_cproj_ids = {id(block.mlp.c_proj.weight) for block in self.transformer.h}
         all_h_params = list(self.transformer.h.parameters())
-        matrix_params = [p for p in all_h_params if id(p) not in mlp_cproj_ids]
+        l3_lookup_matrix_params = [self.l3_lookup.proj.weight, self.l3_lookup.gate.weight]
+        matrix_params = [p for p in all_h_params if id(p) not in mlp_cproj_ids] + l3_lookup_matrix_params
         mlp_cproj_params = [p for p in all_h_params if id(p) in mlp_cproj_ids]
         embedding_params = list(self.transformer.wte.parameters())
         value_emb_params = list(self.value_emb.parameters())
+        l3_lookup_embedding_params = [self.l3_lookup.lookup.weight]
         lm_head_params = list(self.lm_head.parameters())
         resid_params = [self.resid_lambdas]
         x0_params = [self.x0_lambdas]
         logit_mult_params = [self.logit_mult]
+        l3_lookup_alpha_params = [self.l3_lookup.alpha]
         assert len(list(self.parameters())) == (
             len(matrix_params)
             + len(mlp_cproj_params)
             + len(embedding_params)
             + len(value_emb_params)
+            + len(l3_lookup_embedding_params)
             + len(lm_head_params)
             + len(resid_params)
             + len(x0_params)
             + len(logit_mult_params)
+            + len(l3_lookup_alpha_params)
         )
         # muP scaling factors (at base width MUP_BASE_WIDTH, all factors = 1.0)
         mup_embed_lr_scale = 1.0  # Input embeddings: no width scaling
@@ -600,9 +633,11 @@ class GPT(nn.Module):
             dict(kind="adamw", params=lm_head_params, lr=unembedding_lr * mup_output_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=embedding_params, lr=embedding_lr * mup_embed_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=value_emb_params, lr=embedding_lr * mup_embed_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+            dict(kind="adamw", params=l3_lookup_embedding_params, lr=embedding_lr * mup_embed_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=resid_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=logit_mult_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+            dict(kind="adamw", params=l3_lookup_alpha_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
         ]
         muon_group_chunk = 8
         for shape in sorted({p.shape for p in matrix_params}):
@@ -655,6 +690,8 @@ class GPT(nn.Module):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             window_size = self.window_sizes[i]
             x = block(x, cos_sin, window_size, ve=ve)
+            if i == L3_LOOKUP_LAYER:
+                x = self.l3_lookup(x, idx)
         x = norm(x)
 
         softcap = 15
@@ -834,6 +871,9 @@ MUP_BASE_WIDTH = 768
 # Model architecture
 ASPECT_RATIO = 38         # model_dim = depth * ASPECT_RATIO (d20*38=760 rounds to 768)
 HEAD_DIM = 128            # target head dimension for attention
+L3_LOOKUP_LAYER = 13      # MLP-only layer that receives token-routed lookup memory
+L3_LOOKUP_BUCKETS = 2 ** 15
+L3_LOOKUP_DIM = 128
 WINDOW_PATTERN = "SSSL"   # sliding window on early layers, full on every 4th
 SHORT_WINDOW = 256        # short window size in tokens (modded-nanogpt uses 128-384)
 
