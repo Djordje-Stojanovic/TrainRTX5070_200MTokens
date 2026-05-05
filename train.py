@@ -313,7 +313,6 @@ class GPTConfig:
     use_activation_checkpointing: bool = False
     compute_dtype: torch.dtype = torch.bfloat16
     mlp_only_layers: tuple = ()
-    prores_warmup_ratio: float = 0.0
 
 
 def norm(x):
@@ -428,14 +427,14 @@ class Block(nn.Module):
         self.mlp = MLP(config)
         self.use_mlp_checkpointing = config.use_activation_checkpointing
 
-    def forward(self, x, cos_sin, window_size, residual_scale, ve=None):
+    def forward(self, x, cos_sin, window_size, ve=None):
         if not self.mlp_only:
             # Token shift: mix last quarter of channels with previous position
             quarter = x.size(-1) // 4
             x_prev = torch.roll(x, 1, dims=1)
             x_prev[:, 0, :] = x[:, 0, :]
             x_attn_in = torch.cat([x[:, :, :3*quarter], x_prev[:, :, 3*quarter:]], dim=-1)
-            x = x + residual_scale * norm(self.attn(norm(x_attn_in), cos_sin, window_size, ve=ve))
+            x = x + norm(self.attn(norm(x_attn_in), cos_sin, window_size, ve=ve))
         if self.mlp_only:
             # Token shift for MLP-only layers: only local context source since no attention
             quarter = x.size(-1) // 4
@@ -446,9 +445,9 @@ class Block(nn.Module):
         else:
             x_normed = norm(x)
         if self.use_mlp_checkpointing:
-            x = x + residual_scale * norm(torch_checkpoint(self.mlp, x_normed, use_reentrant=False))
+            x = x + norm(torch_checkpoint(self.mlp, x_normed, use_reentrant=False))
         else:
-            x = x + residual_scale * norm(self.mlp(x_normed))
+            x = x + norm(self.mlp(x_normed))
         return x
 
 
@@ -467,8 +466,6 @@ class GPT(nn.Module):
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
         self.logit_mult = nn.Parameter(torch.ones(1))
-        self.register_buffer("prores_layer_ends", torch.empty(config.n_layer), persistent=False)
-        self.register_buffer("prores_scales", torch.ones(config.n_layer), persistent=False)
         head_dim = config.n_embd // config.n_head
         self.rotary_seq_len = config.sequence_len
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim, dtype=config.compute_dtype)
@@ -496,7 +493,6 @@ class GPT(nn.Module):
         self.resid_lambdas.fill_(1.0)
         self.x0_lambdas.fill_(0.2)
         self.logit_mult.fill_(1.0)
-        self._reset_prores_buffers()
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(
             self.rotary_seq_len,
@@ -505,25 +501,6 @@ class GPT(nn.Module):
         )
         self.cos, self.sin = cos, sin
         self.transformer.wte.to(dtype=embed_dtype)
-
-    @torch.no_grad()
-    def _reset_prores_buffers(self):
-        n_layer = self.config.n_layer
-        layer_ids = torch.arange(1, n_layer + 1, device=self.prores_layer_ends.device, dtype=torch.float32)
-        if self.config.prores_warmup_ratio > 0:
-            layer_ends = self.config.prores_warmup_ratio * layer_ids / n_layer
-        else:
-            layer_ends = torch.ones_like(layer_ids)
-        self.prores_layer_ends.copy_(layer_ends)
-        self.prores_scales.fill_(1.0)
-
-    @torch.no_grad()
-    def set_prores_progress(self, progress):
-        if self.config.prores_warmup_ratio <= 0:
-            self.prores_scales.fill_(1.0)
-            return
-        progress_t = self.prores_layer_ends.new_tensor(float(progress))
-        self.prores_scales.copy_(torch.clamp(progress_t / self.prores_layer_ends, max=1.0))
 
     def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000, device=None, dtype=torch.bfloat16):
         if device is None:
@@ -677,7 +654,7 @@ class GPT(nn.Module):
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             window_size = self.window_sizes[i]
-            x = block(x, cos_sin, window_size, self.prores_scales[i], ve=ve)
+            x = block(x, cos_sin, window_size, ve=ve)
         x = norm(x)
 
         softcap = 15
@@ -871,7 +848,6 @@ ADAM_BETAS = (0.8, 0.95)
 WARMUP_RATIO = 0.05
 WARMDOWN_RATIO = 0.0         # WSD: no decay for experiment runs (warmup + stable only)
 FINAL_LR_FRAC = 0.1
-PRORES_WARMUP_RATIO = 0.18  # deepest residual branches reach full strength at 18% of tokens
 
 # Model size + memory defaults
 DEPTH = 20
@@ -899,7 +875,6 @@ def build_model_config(depth, vocab_size, runtime, use_activation_checkpointing=
         use_activation_checkpointing=use_activation_checkpointing,
         compute_dtype=runtime.amp_dtype,
         mlp_only_layers=tuple(MLP_ONLY_LAYERS) if MLP_ONLY_LAYERS else (),
-        prores_warmup_ratio=PRORES_WARMUP_RATIO,
     )
 
 
@@ -1184,15 +1159,6 @@ def _run_training_once(runtime, tokenizer, config, device_batch_size, smoke_test
     target_steps = target_tokens // TOTAL_BATCH_SIZE
     print(f"Token budget: {target_tokens / 1e6:.0f}M tokens ({target_steps} steps)")
     print(f"Gradient accumulation steps: {grad_accum_steps}")
-    if config.prores_warmup_ratio > 0:
-        print(
-            "ProRes residual warmup: "
-            f"deepest layer full at {100 * config.prores_warmup_ratio:.1f}% of token budget"
-        )
-
-    def set_model_prores_progress(progress):
-        target_model = model._orig_mod if hasattr(model, "_orig_mod") else model
-        target_model.set_prores_progress(progress)
 
     def get_lr_multiplier(progress):
         if progress < WARMUP_RATIO:
@@ -1219,8 +1185,6 @@ def _run_training_once(runtime, tokenizer, config, device_batch_size, smoke_test
     while True:
         torch.cuda.synchronize()
         t0 = time.time()
-        prores_progress = min((step + 1) / max(target_steps, 1), 1.0)
-        set_model_prores_progress(prores_progress)
         for _ in range(grad_accum_steps):
             with autocast_ctx:
                 loss = model(x, y)
@@ -1289,7 +1253,6 @@ def _run_training_once(runtime, tokenizer, config, device_batch_size, smoke_test
     # which only tracks tensor allocations and misses caching allocator + triton workspace
     free_bytes, total_bytes = torch.cuda.mem_get_info()
     train_peak_vram_mb = (total_bytes - free_bytes) / 1024 / 1024
-    set_model_prores_progress(1.0)
     return {
         "model": model,
         "num_params": num_params,
