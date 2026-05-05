@@ -341,10 +341,6 @@ class CausalSelfAttention(nn.Module):
         assert self.n_embd % self.n_head == 0
         assert self.n_kv_head <= self.n_head and self.n_head % self.n_kv_head == 0
         self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
-        q_nl_hidden = self.n_embd // 2
-        self.q_nl_down = nn.Linear(self.n_embd, q_nl_hidden, bias=False)
-        self.q_nl_up = nn.Linear(q_nl_hidden, self.n_head * self.head_dim, bias=False)
-        self.q_nl_alpha = nn.Parameter(torch.zeros(()))
         self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
@@ -371,9 +367,7 @@ class CausalSelfAttention(nn.Module):
 
     def forward(self, x, cos_sin, window_size, ve=None):
         B, T, _ = x.size()
-        q = self.c_q(x)
-        q_nl = self.q_nl_up(F.gelu(self.q_nl_down(norm(x)), approximate="tanh"))
-        q = (q + self.q_nl_alpha * q_nl).view(B, T, self.n_head, self.head_dim)
+        q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
         k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
         v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
         if ve is not None:
@@ -489,9 +483,6 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             if not block.mlp_only:
                 torch.nn.init.uniform_(block.attn.c_q.weight, -s, s)
-                torch.nn.init.uniform_(block.attn.q_nl_down.weight, -s, s)
-                torch.nn.init.uniform_(block.attn.q_nl_up.weight, -s, s)
-                block.attn.q_nl_alpha.zero_()
                 torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
                 torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
                 torch.nn.init.zeros_(block.attn.c_proj.weight)
@@ -580,8 +571,7 @@ class GPT(nn.Module):
         # Separate MLP c_proj params for optional LR multiplier
         mlp_cproj_ids = {id(block.mlp.c_proj.weight) for block in self.transformer.h}
         all_h_params = list(self.transformer.h.parameters())
-        branch_scalar_params = [p for p in all_h_params if p.ndim < 2]
-        matrix_params = [p for p in all_h_params if id(p) not in mlp_cproj_ids and p.ndim >= 2]
+        matrix_params = [p for p in all_h_params if id(p) not in mlp_cproj_ids]
         mlp_cproj_params = [p for p in all_h_params if id(p) in mlp_cproj_ids]
         embedding_params = list(self.transformer.wte.parameters())
         value_emb_params = list(self.value_emb.parameters())
@@ -598,7 +588,6 @@ class GPT(nn.Module):
             + len(resid_params)
             + len(x0_params)
             + len(logit_mult_params)
-            + len(branch_scalar_params)
         )
         # muP scaling factors (at base width MUP_BASE_WIDTH, all factors = 1.0)
         mup_embed_lr_scale = 1.0  # Input embeddings: no width scaling
@@ -615,10 +604,6 @@ class GPT(nn.Module):
             dict(kind="adamw", params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=logit_mult_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
         ]
-        if branch_scalar_params:
-            param_groups.append(
-                dict(kind="adamw", params=branch_scalar_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0)
-            )
         muon_group_chunk = 8
         for shape in sorted({p.shape for p in matrix_params}):
             group_params = [p for p in matrix_params if p.shape == shape]
