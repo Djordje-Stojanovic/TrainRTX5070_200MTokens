@@ -313,7 +313,6 @@ class GPTConfig:
     use_activation_checkpointing: bool = False
     compute_dtype: torch.dtype = torch.bfloat16
     mlp_only_layers: tuple = ()
-    noble_cproj_rank: int = 0
 
 
 def norm(x):
@@ -345,10 +344,6 @@ class CausalSelfAttention(nn.Module):
         self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.noble_cproj_rank = config.noble_cproj_rank
-        if self.noble_cproj_rank > 0:
-            self.c_proj_noble_down = nn.Linear(self.n_embd, self.noble_cproj_rank, bias=False)
-            self.c_proj_noble_up = nn.Linear(self.noble_cproj_rank, self.n_embd, bias=False)
         self.ve_gate_channels = 12
         self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False)
         # QK-norm makes attention logits width-invariant already, so muP 1/d scaling
@@ -407,10 +402,7 @@ class CausalSelfAttention(nn.Module):
         y = y.transpose(1, 2)
 
         y = y.contiguous().view(B, T, -1)
-        y_proj = self.c_proj(y)
-        if self.noble_cproj_rank > 0:
-            y_proj = y_proj + self.c_proj_noble_up(F.silu(self.c_proj_noble_down(y)))
-        y = y_proj
+        y = self.c_proj(y)
         return y
 
 
@@ -494,9 +486,6 @@ class GPT(nn.Module):
                 torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
                 torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
                 torch.nn.init.zeros_(block.attn.c_proj.weight)
-                if block.attn.noble_cproj_rank > 0:
-                    torch.nn.init.uniform_(block.attn.c_proj_noble_down.weight, -s, s)
-                    torch.nn.init.zeros_(block.attn.c_proj_noble_up.weight)
                 torch.nn.init.zeros_(block.attn.ve_gate.weight)  # sigmoid(0)=0.5, gate=1.5
             torch.nn.init.uniform_(block.mlp.c_gate.weight, -s, s)
             torch.nn.init.uniform_(block.mlp.c_up.weight, -s, s)
@@ -847,7 +836,6 @@ ASPECT_RATIO = 38         # model_dim = depth * ASPECT_RATIO (d20*38=760 rounds 
 HEAD_DIM = 128            # target head dimension for attention
 WINDOW_PATTERN = "SSSL"   # sliding window on early layers, full on every 4th
 SHORT_WINDOW = 256        # short window size in tokens (modded-nanogpt uses 128-384)
-NOBLE_CPROJ_RANK = 64     # nonlinear low-rank branch on attention output projection
 
 # Optimization
 TOTAL_BATCH_SIZE = 2 ** 17
@@ -887,7 +875,6 @@ def build_model_config(depth, vocab_size, runtime, use_activation_checkpointing=
         use_activation_checkpointing=use_activation_checkpointing,
         compute_dtype=runtime.amp_dtype,
         mlp_only_layers=tuple(MLP_ONLY_LAYERS) if MLP_ONLY_LAYERS else (),
-        noble_cproj_rank=NOBLE_CPROJ_RANK,
     )
 
 
