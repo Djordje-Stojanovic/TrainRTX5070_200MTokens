@@ -313,7 +313,6 @@ class GPTConfig:
     use_activation_checkpointing: bool = False
     compute_dtype: torch.dtype = torch.bfloat16
     mlp_only_layers: tuple = ()
-    branch_scale_delta: float = 0.0
 
 
 def norm(x):
@@ -423,10 +422,6 @@ class Block(nn.Module):
     def __init__(self, config, layer_idx, mlp_only=False):
         super().__init__()
         self.mlp_only = mlp_only
-        if config.n_layer > 1:
-            self.branch_scale = 1.0 + config.branch_scale_delta * layer_idx / (config.n_layer - 1)
-        else:
-            self.branch_scale = 1.0
         if not mlp_only:
             self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
@@ -439,7 +434,7 @@ class Block(nn.Module):
             x_prev = torch.roll(x, 1, dims=1)
             x_prev[:, 0, :] = x[:, 0, :]
             x_attn_in = torch.cat([x[:, :, :3*quarter], x_prev[:, :, 3*quarter:]], dim=-1)
-            x = x + self.branch_scale * norm(self.attn(norm(x_attn_in), cos_sin, window_size, ve=ve))
+            x = x + norm(self.attn(norm(x_attn_in), cos_sin, window_size, ve=ve))
         if self.mlp_only:
             # Token shift for MLP-only layers: only local context source since no attention
             quarter = x.size(-1) // 4
@@ -450,9 +445,9 @@ class Block(nn.Module):
         else:
             x_normed = norm(x)
         if self.use_mlp_checkpointing:
-            x = x + self.branch_scale * norm(torch_checkpoint(self.mlp, x_normed, use_reentrant=False))
+            x = x + norm(torch_checkpoint(self.mlp, x_normed, use_reentrant=False))
         else:
-            x = x + self.branch_scale * norm(self.mlp(x_normed))
+            x = x + norm(self.mlp(x_normed))
         return x
 
 
@@ -841,7 +836,6 @@ ASPECT_RATIO = 38         # model_dim = depth * ASPECT_RATIO (d20*38=760 rounds 
 HEAD_DIM = 128            # target head dimension for attention
 WINDOW_PATTERN = "SSSL"   # sliding window on early layers, full on every 4th
 SHORT_WINDOW = 256        # short window size in tokens (modded-nanogpt uses 128-384)
-BRANCH_SCALE_DELTA = 0.15 # static residual branch scale grows 1.00->1.15 with depth
 
 # Optimization
 TOTAL_BATCH_SIZE = 2 ** 17
@@ -881,7 +875,6 @@ def build_model_config(depth, vocab_size, runtime, use_activation_checkpointing=
         use_activation_checkpointing=use_activation_checkpointing,
         compute_dtype=runtime.amp_dtype,
         mlp_only_layers=tuple(MLP_ONLY_LAYERS) if MLP_ONLY_LAYERS else (),
-        branch_scale_delta=BRANCH_SCALE_DELTA,
     )
 
 
