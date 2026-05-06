@@ -156,7 +156,7 @@ Training takes ~55 min total (~50 min training + ~5 min startup/compile/eval).
 5. Repeat step 3-4 until training finishes (~50 min). When eval starts, **`sleep 240`** (4 min) for eval to complete.
 6. When done, extract all metrics with one grep.
 
-Max ~7 checks per run (1x4min + ~5x10min + 1x4min = ~62min covers full run).
+Max ~13 checks per run (1x4min + up to 11x10min + 1x4min = ~118min covers the 120min cap).
 
 **MANDATORY: Status update on every check.** When you check `tail -1 run.log`, parse the step line and report to the user:
 - Current smoothed loss and trend (improving/flat/worsening)

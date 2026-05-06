@@ -168,7 +168,7 @@ LOOP FOREVER:
 8. If val_bpb improved (lower), you "advance" the branch, keeping the git commit
 9. If val_bpb is equal or worse, you git reset back to where you started
 
-**Timeout**: Each experiment should take ~55 minutes total (+ a few minutes for startup/compilation and eval overhead). If a run exceeds 75 minutes, kill it and treat it as a failure (discard and revert).
+**Timeout**: Each experiment should usually take ~55 minutes total (+ a few minutes for startup/compilation and eval overhead). Because experiments are judged on a fixed 200M-token budget, slower runs may continue if they are making steady progress. If a run exceeds 120 minutes, kill it and treat it as a failure (discard and revert).
 
 **Crashes**: If a run crashes (OOM, or a bug), use your judgment: If it's easy to fix (typo, missing import), fix and re-run. If fundamentally broken, log "crash" and move on.
 
