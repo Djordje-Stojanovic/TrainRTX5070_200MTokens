@@ -346,8 +346,6 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
         self.ve_gate_channels = 12
         self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False)
-        # MoDA-lite depth K/V mix: gate scalar applied to prior L-layer's pre-norm K/V
-        self.depth_gate = nn.Parameter(torch.zeros(1))
         # QK-norm makes attention logits width-invariant already, so muP 1/d scaling
         # is unnecessary and harmful (makes softmax too flat). Keep 1/sqrt(d).
         self.attn_scale = 1.0 / self.head_dim ** 0.5
@@ -367,7 +365,7 @@ class CausalSelfAttention(nn.Module):
         self._mask_cache[cache_key] = mask
         return mask
 
-    def forward(self, x, cos_sin, window_size, ve=None, prev_kv=None):
+    def forward(self, x, cos_sin, window_size, ve=None):
         B, T, _ = x.size()
         q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
         k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
@@ -385,14 +383,6 @@ class CausalSelfAttention(nn.Module):
         k_pass_shifted = torch.roll(k_pass, 1, dims=1)
         k_pass_shifted[:, 0] = k_pass[:, 0]  # keep first position unchanged
         k = torch.cat([k_rot, k_pass_shifted], dim=-1)
-        # Cache pre-norm K/V (post-RoPE+shift+VE) for depth-mixing in next L-layer.
-        kv_cache = (k, v)
-        # MoDA-lite: additively mix gated K/V from prior L-layer at same positions.
-        if prev_kv is not None:
-            prev_k, prev_v = prev_kv
-            gate_k = self.depth_gate.to(k.dtype)
-            k = k + gate_k * prev_k
-            v = v + gate_k * prev_v
         q, k = norm(q), norm(k)
 
         q = q.transpose(1, 2)  # (B, H, T, D)
@@ -413,7 +403,7 @@ class CausalSelfAttention(nn.Module):
 
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
-        return y, kv_cache
+        return y
 
 
 class MLP(nn.Module):
@@ -437,16 +427,14 @@ class Block(nn.Module):
         self.mlp = MLP(config)
         self.use_mlp_checkpointing = config.use_activation_checkpointing
 
-    def forward(self, x, cos_sin, window_size, ve=None, prev_kv=None):
-        kv_cache = None
+    def forward(self, x, cos_sin, window_size, ve=None):
         if not self.mlp_only:
             # Token shift: mix last quarter of channels with previous position
             quarter = x.size(-1) // 4
             x_prev = torch.roll(x, 1, dims=1)
             x_prev[:, 0, :] = x[:, 0, :]
             x_attn_in = torch.cat([x[:, :, :3*quarter], x_prev[:, :, 3*quarter:]], dim=-1)
-            attn_out, kv_cache = self.attn(norm(x_attn_in), cos_sin, window_size, ve=ve, prev_kv=prev_kv)
-            x = x + norm(attn_out)
+            x = x + norm(self.attn(norm(x_attn_in), cos_sin, window_size, ve=ve))
         if self.mlp_only:
             # Token shift for MLP-only layers: only local context source since no attention
             quarter = x.size(-1) // 4
@@ -460,7 +448,7 @@ class Block(nn.Module):
             x = x + norm(torch_checkpoint(self.mlp, x_normed, use_reentrant=False))
         else:
             x = x + norm(self.mlp(x_normed))
-        return x, kv_cache
+        return x
 
 
 class GPT(nn.Module):
@@ -582,12 +570,9 @@ class GPT(nn.Module):
         model_dim = self.config.n_embd
         # Separate MLP c_proj params for optional LR multiplier
         mlp_cproj_ids = {id(block.mlp.c_proj.weight) for block in self.transformer.h}
-        # Depth-gate scalars (MoDA-lite) are 1D and must NOT go into Muon
-        depth_gate_ids = {id(block.attn.depth_gate) for block in self.transformer.h if not block.mlp_only}
         all_h_params = list(self.transformer.h.parameters())
-        matrix_params = [p for p in all_h_params if id(p) not in mlp_cproj_ids and id(p) not in depth_gate_ids]
+        matrix_params = [p for p in all_h_params if id(p) not in mlp_cproj_ids]
         mlp_cproj_params = [p for p in all_h_params if id(p) in mlp_cproj_ids]
-        depth_gate_params = [p for p in all_h_params if id(p) in depth_gate_ids]
         embedding_params = list(self.transformer.wte.parameters())
         value_emb_params = list(self.value_emb.parameters())
         lm_head_params = list(self.lm_head.parameters())
@@ -597,7 +582,6 @@ class GPT(nn.Module):
         assert len(list(self.parameters())) == (
             len(matrix_params)
             + len(mlp_cproj_params)
-            + len(depth_gate_params)
             + len(embedding_params)
             + len(value_emb_params)
             + len(lm_head_params)
@@ -619,7 +603,6 @@ class GPT(nn.Module):
             dict(kind="adamw", params=resid_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=logit_mult_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind="adamw", params=depth_gate_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
         ]
         muon_group_chunk = 8
         for shape in sorted({p.shape for p in matrix_params}):
@@ -668,15 +651,10 @@ class GPT(nn.Module):
         x = norm(x)
         x0 = x
         ve = self.value_emb(idx)
-        prev_l_kv = None  # MoDA-lite: cached pre-norm K/V from prior L-layer
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             window_size = self.window_sizes[i]
-            is_l_attn = (window_size[0] >= T) and (not block.mlp_only)
-            prev_kv = prev_l_kv if is_l_attn else None
-            x, kv = block(x, cos_sin, window_size, ve=ve, prev_kv=prev_kv)
-            if is_l_attn:
-                prev_l_kv = kv
+            x = block(x, cos_sin, window_size, ve=ve)
         x = norm(x)
 
         softcap = 15
