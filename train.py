@@ -418,40 +418,13 @@ class MLP(nn.Module):
         return self.c_proj(F.silu(self.c_gate(x)) * self.c_up(x))
 
 
-class HourglassSub(nn.Module):
-    def __init__(self, d_model, d_h):
-        super().__init__()
-        self.c_gate = nn.Linear(d_model, d_h, bias=False)
-        self.c_up = nn.Linear(d_model, d_h, bias=False)
-        self.c_proj = nn.Linear(d_h, d_model, bias=False)
-
-    def forward(self, x):
-        return self.c_proj(F.silu(self.c_gate(x)) * self.c_up(x))
-
-
-class MLPHourglass(nn.Module):
-    """K-stack SwiGLU hourglass FFN with internal residuals + pre-norms.
-    Parameter-matched to a single wide SwiGLU when K * d_h == standard hidden.
-    Per arxiv 2602.06471 (Revisiting the Shape Convention)."""
-    def __init__(self, config, K=4, d_h=512):
-        super().__init__()
-        self.subs = nn.ModuleList([HourglassSub(config.n_embd, d_h) for _ in range(K)])
-
-    def forward(self, x):
-        h = x
-        for sub in self.subs:
-            h_in = F.rms_norm(h, (h.size(-1),))
-            h = h + sub(h_in)
-        return h - x
-
-
 class Block(nn.Module):
     def __init__(self, config, layer_idx, mlp_only=False):
         super().__init__()
         self.mlp_only = mlp_only
         if not mlp_only:
             self.attn = CausalSelfAttention(config, layer_idx)
-        self.mlp = MLPHourglass(config) if mlp_only else MLP(config)
+        self.mlp = MLP(config)
         self.use_mlp_checkpointing = config.use_activation_checkpointing
 
     def forward(self, x, cos_sin, window_size, ve=None):
@@ -514,15 +487,9 @@ class GPT(nn.Module):
                 torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
                 torch.nn.init.zeros_(block.attn.c_proj.weight)
                 torch.nn.init.zeros_(block.attn.ve_gate.weight)  # sigmoid(0)=0.5, gate=1.5
-            if isinstance(block.mlp, MLPHourglass):
-                for sub in block.mlp.subs:
-                    torch.nn.init.uniform_(sub.c_gate.weight, -s, s)
-                    torch.nn.init.uniform_(sub.c_up.weight, -s, s)
-                    torch.nn.init.zeros_(sub.c_proj.weight)
-            else:
-                torch.nn.init.uniform_(block.mlp.c_gate.weight, -s, s)
-                torch.nn.init.uniform_(block.mlp.c_up.weight, -s, s)
-                torch.nn.init.zeros_(block.mlp.c_proj.weight)
+            torch.nn.init.uniform_(block.mlp.c_gate.weight, -s, s)
+            torch.nn.init.uniform_(block.mlp.c_up.weight, -s, s)
+            torch.nn.init.zeros_(block.mlp.c_proj.weight)
         self.resid_lambdas.fill_(1.0)
         self.x0_lambdas.fill_(0.2)
         self.logit_mult.fill_(1.0)
@@ -602,13 +569,7 @@ class GPT(nn.Module):
                         c_proj_lr_mult=1.0):
         model_dim = self.config.n_embd
         # Separate MLP c_proj params for optional LR multiplier
-        mlp_cproj_ids = set()
-        for block in self.transformer.h:
-            if isinstance(block.mlp, MLPHourglass):
-                for sub in block.mlp.subs:
-                    mlp_cproj_ids.add(id(sub.c_proj.weight))
-            else:
-                mlp_cproj_ids.add(id(block.mlp.c_proj.weight))
+        mlp_cproj_ids = {id(block.mlp.c_proj.weight) for block in self.transformer.h}
         all_h_params = list(self.transformer.h.parameters())
         matrix_params = [p for p in all_h_params if id(p) not in mlp_cproj_ids]
         mlp_cproj_params = [p for p in all_h_params if id(p) in mlp_cproj_ids]
