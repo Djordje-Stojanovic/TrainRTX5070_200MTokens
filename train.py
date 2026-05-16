@@ -313,7 +313,6 @@ class GPTConfig:
     use_activation_checkpointing: bool = False
     compute_dtype: torch.dtype = torch.bfloat16
     mlp_only_layers: tuple = ()
-    gdn_layers: tuple = ()
 
 
 def norm(x):
@@ -407,56 +406,6 @@ class CausalSelfAttention(nn.Module):
         return y
 
 
-class GatedDeltaNetLite(nn.Module):
-    """Diagonal Gated DeltaNet-style mixer with a parallel causal scan."""
-
-    def __init__(self, config, layer_idx):
-        super().__init__()
-        self.n_head = config.n_head
-        self.n_kv_head = config.n_kv_head
-        self.n_embd = config.n_embd
-        self.head_dim = self.n_embd // self.n_head
-        assert self.n_kv_head == self.n_head
-        self.c_q = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.c_k = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.c_v = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.c_alpha = nn.Linear(self.n_embd, self.n_head, bias=False)
-        self.c_beta = nn.Linear(self.n_embd, self.n_head, bias=False)
-        self.o_gate = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.ve_gate_channels = 12
-        self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_head, bias=False)
-        self.decay_scale = float(self.head_dim)
-
-    def forward(self, x, cos_sin, window_size, ve=None):
-        B, T, _ = x.size()
-        q = F.silu(self.c_q(x)).view(B, T, self.n_head, self.head_dim)
-        k = F.silu(self.c_k(x)).view(B, T, self.n_head, self.head_dim)
-        v = F.silu(self.c_v(x)).view(B, T, self.n_head, self.head_dim)
-        if ve is not None:
-            ve = ve.view(B, T, self.n_head, self.head_dim)
-            gate = 3 * torch.sigmoid(self.ve_gate(x[..., :self.ve_gate_channels]))
-            v = v + gate.unsqueeze(-1) * ve
-
-        q = F.normalize(q.float(), p=2.0, dim=-1, eps=1e-6)
-        k = F.normalize(k.float(), p=2.0, dim=-1, eps=1e-6)
-        alpha = torch.exp(
-            -F.softplus(self.c_alpha(x).float()).view(B, T, self.n_head, 1) / self.decay_scale
-        )
-        beta = torch.sigmoid(self.c_beta(x).float()).view(B, T, self.n_head, 1)
-
-        # Diagonal delta rule: s_t = a_t*s_{t-1} + beta_t*k_t*v_t.
-        a = (alpha * (1.0 - beta * k.square())).clamp(1e-4, 1.0)
-        b = beta * k * v.float()
-        prefix_log = torch.cumsum(torch.log(a), dim=1)
-        prefix = torch.exp(prefix_log).clamp_min(1e-5)
-        state = prefix * torch.cumsum(b / prefix, dim=1)
-        y = (q * state).to(x.dtype).reshape(B, T, self.n_embd)
-        y = y * (2 * torch.sigmoid(self.o_gate(x)))
-        y = self.c_proj(y)
-        return y
-
-
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -474,10 +423,7 @@ class Block(nn.Module):
         super().__init__()
         self.mlp_only = mlp_only
         if not mlp_only:
-            if layer_idx in config.gdn_layers:
-                self.attn = GatedDeltaNetLite(config, layer_idx)
-            else:
-                self.attn = CausalSelfAttention(config, layer_idx)
+            self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
         self.use_mlp_checkpointing = config.use_activation_checkpointing
 
@@ -536,16 +482,11 @@ class GPT(nn.Module):
         s = 3 ** 0.5 * n_embd ** -0.5
         for block in self.transformer.h:
             if not block.mlp_only:
-                attn = block.attn
-                torch.nn.init.uniform_(attn.c_q.weight, -s, s)
-                torch.nn.init.uniform_(attn.c_k.weight, -s, s)
-                torch.nn.init.uniform_(attn.c_v.weight, -s, s)
-                torch.nn.init.zeros_(attn.c_proj.weight)
-                torch.nn.init.zeros_(attn.ve_gate.weight)  # sigmoid(0)=0.5, gate=1.5
-                if isinstance(attn, GatedDeltaNetLite):
-                    torch.nn.init.zeros_(attn.c_alpha.weight)  # alpha ~= 0.995 via softplus(0)
-                    torch.nn.init.zeros_(attn.c_beta.weight)   # beta = 0.5
-                    torch.nn.init.zeros_(attn.o_gate.weight)   # 2*sigmoid(0)=1
+                torch.nn.init.uniform_(block.attn.c_q.weight, -s, s)
+                torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
+                torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
+                torch.nn.init.zeros_(block.attn.c_proj.weight)
+                torch.nn.init.zeros_(block.attn.ve_gate.weight)  # sigmoid(0)=0.5, gate=1.5
             torch.nn.init.uniform_(block.mlp.c_gate.weight, -s, s)
             torch.nn.init.uniform_(block.mlp.c_up.weight, -s, s)
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
@@ -601,11 +542,7 @@ class GPT(nn.Module):
         q = self.config.n_embd // self.config.n_head
         t = self.config.sequence_len
         attn_flops = 0
-        gdn_layers = set(self.config.gdn_layers)
-        for layer_idx, window_size in enumerate(self.window_sizes):
-            if layer_idx in gdn_layers:
-                attn_flops += 18 * self.config.n_embd
-                continue
+        for window_size in self.window_sizes:
             window = window_size[0]
             effective_seq = t if window < 0 else min(window, t)
             attn_flops += 12 * h * q * effective_seq
@@ -915,7 +852,6 @@ FINAL_LR_FRAC = 0.1
 # Model size + memory defaults
 DEPTH = 20
 MLP_ONLY_LAYERS = {12, 13, 14}  # S-layers replaced with MLP-only for throughput
-GATED_DELTA_LAYERS = {16, 18}   # Replace two late S attention layers with GDN-lite
 DEVICE_BATCH_SIZE = 16
 EVAL_BATCH_SIZE = 8
 
@@ -939,7 +875,6 @@ def build_model_config(depth, vocab_size, runtime, use_activation_checkpointing=
         use_activation_checkpointing=use_activation_checkpointing,
         compute_dtype=runtime.amp_dtype,
         mlp_only_layers=tuple(MLP_ONLY_LAYERS) if MLP_ONLY_LAYERS else (),
-        gdn_layers=tuple(GATED_DELTA_LAYERS) if GATED_DELTA_LAYERS else (),
     )
 
 
