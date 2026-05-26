@@ -13,7 +13,6 @@ import math
 import os
 import platform
 import time
-from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -1132,45 +1131,6 @@ def _configure_step_kernels(runtime):
     USE_COMPILE = True
 
 
-FP8_GEMM_LINEAR_NAMES = frozenset({"c_q", "c_k", "c_v", "c_proj", "c_gate", "c_up"})
-
-
-def _deepseek_fp8_island_policy(fqn, mod, granularity):
-    if not isinstance(mod, nn.Linear):
-        return False, "nonlinear_or_state"
-    leaf_name = fqn.rsplit(".", 1)[-1]
-    if leaf_name == "lm_head":
-        return False, "lm_head_logits"
-    if leaf_name == "ve_gate":
-        return False, "value_embedding_gate"
-    if leaf_name not in FP8_GEMM_LINEAR_NAMES:
-        return False, "unknown_linear"
-    if mod.in_features % granularity != 0 or mod.out_features % granularity != 0:
-        return False, "shape_not_fp8_aligned"
-    return True, "fp8_gemm"
-
-
-def _print_fp8_island_audit(model, granularity):
-    converted = []
-    protected = []
-    for fqn, mod in model.named_modules():
-        should_convert, reason = _deepseek_fp8_island_policy(fqn, mod, granularity)
-        if should_convert:
-            converted.append(fqn)
-        elif isinstance(mod, nn.Linear):
-            protected.append((fqn, reason))
-
-    converted_kinds = Counter(name.rsplit(".", 1)[-1] for name in converted)
-    protected_reasons = Counter(reason for _, reason in protected)
-    print("DeepSeek-style FP8 island audit:")
-    print(f"  FP8 GEMM Linear modules: {len(converted)} ({dict(sorted(converted_kinds.items()))})")
-    print(f"  protected Linear modules: {len(protected)} ({dict(sorted(protected_reasons.items()))})")
-    if protected:
-        examples = ", ".join(f"{name}:{reason}" for name, reason in protected[:8])
-        print(f"  protected examples: {examples}")
-    print("  protected non-Linears: embeddings, RMSNorm/norm ops, RoPE/QK attention math, loss, optimizer states")
-
-
 def _run_training_once(runtime, tokenizer, config, device_batch_size, smoke_test):
     t_start = time.time()
     torch.manual_seed(42)
@@ -1214,21 +1174,21 @@ def _run_training_once(runtime, tokenizer, config, device_batch_size, smoke_test
         from torchao.prototype.mx_formats import MXLinearConfig
         _mx_cfg = MXLinearConfig.from_recipe_name('mxfp8_cublas')
         def _mxfp8_filter(mod, fqn):
-            should_convert, _ = _deepseek_fp8_island_policy(fqn, mod, 32)
-            return should_convert
-        _print_fp8_island_audit(model, 32)
+            if isinstance(mod, nn.Linear):
+                return mod.in_features % 32 == 0 and mod.out_features % 32 == 0
+            return False
         quantize_(model, _mx_cfg, filter_fn=_mxfp8_filter)
-        print("MXFP8 cuBLAS training enabled for audited GEMM islands")
+        print(f"MXFP8 cuBLAS training enabled (skipped layers with dims not divisible by 32)")
     except Exception as e:
         print(f"MXFP8 not available ({e}), falling back to standard FP8")
         try:
             from torchao.float8 import convert_to_float8_training
             def _fp8_filter(mod, fqn):
-                should_convert, _ = _deepseek_fp8_island_policy(fqn, mod, 16)
-                return should_convert
-            _print_fp8_island_audit(model, 16)
+                if isinstance(mod, nn.Linear):
+                    return mod.in_features % 16 == 0 and mod.out_features % 16 == 0
+                return True
             convert_to_float8_training(model, module_filter_fn=_fp8_filter)
-            print("FP8 training enabled for audited GEMM islands")
+            print(f"FP8 training enabled (skipped layers with dims not divisible by 16)")
         except Exception as e2:
             print(f"FP8 not available ({e2}), using bf16")
 
