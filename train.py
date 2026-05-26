@@ -6,6 +6,8 @@ Usage: uv run train.py
 
 import argparse
 import gc
+import importlib.metadata
+import importlib.util
 import json
 import math
 import os
@@ -233,6 +235,53 @@ def _select_amp_dtype(gpu_cc):
     if gpu_cc >= (8, 0) and torch.cuda.is_bf16_supported(including_emulation=False):
         return torch.bfloat16
     return torch.float16
+
+
+def _package_version(dist_name):
+    try:
+        return importlib.metadata.version(dist_name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _module_status(module_name, dist_name=None):
+    version = _package_version(dist_name or module_name)
+    found = importlib.util.find_spec(module_name) is not None
+    if version is None and not found:
+        return "missing"
+    if version is None:
+        return "installed (version unknown)"
+    return f"installed ({version})"
+
+
+def print_kernel_stack_audit(runtime):
+    print("Kernel stack audit:")
+    print(f"  platform: {platform.platform()}")
+    print(f"  python: {platform.python_version()}")
+    print(f"  torch: {torch.__version__}")
+    print(f"  torch cuda build: {torch.version.cuda}")
+    print(f"  cuda available: {torch.cuda.is_available()}")
+    print(f"  cuda device capability: sm_{runtime.gpu_cc[0]}{runtime.gpu_cc[1]}")
+    print(f"  cudnn version: {torch.backends.cudnn.version() if hasattr(torch.backends, 'cudnn') else 'missing'}")
+    print(f"  flash sdp enabled: {torch.backends.cuda.flash_sdp_enabled()}")
+    print(f"  mem-efficient sdp enabled: {torch.backends.cuda.mem_efficient_sdp_enabled()}")
+    print(f"  math sdp enabled: {torch.backends.cuda.math_sdp_enabled()}")
+    for module_name, dist_name in [
+        ("torchao", "torchao"),
+        ("triton", "triton"),
+        ("transformer_engine", "transformer-engine"),
+        ("flash_attn", "flash-attn"),
+        ("cudnn", "nvidia-cudnn-cu12"),
+    ]:
+        print(f"  {module_name}: {_module_status(module_name, dist_name)}")
+    mxfp8_path = Path(__file__).parent / "_C_mxfp8.pyd"
+    print(f"  local _C_mxfp8.pyd: {'present' if mxfp8_path.exists() else 'missing'}")
+    if mxfp8_path.exists():
+        try:
+            torch.ops.load_library(str(mxfp8_path))
+            print("  local _C_mxfp8.pyd load: ok")
+        except Exception as exc:
+            print(f"  local _C_mxfp8.pyd load: failed ({exc})")
 
 
 def detect_runtime():
@@ -1297,6 +1346,7 @@ def main():
     print(f"AMP dtype: {runtime.amp_dtype}")
     if runtime.gpu_peak_flops:
         print(f"GPU peak FLOPS: {runtime.gpu_peak_flops / 1e12:.1f} TFLOPS ({runtime.amp_dtype}, measured)")
+    print_kernel_stack_audit(runtime)
 
     tokenizer = Tokenizer.from_directory(dataset=args.dataset)
     vocab_size = tokenizer.get_vocab_size()
